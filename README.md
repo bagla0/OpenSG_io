@@ -22,14 +22,10 @@ Convert a [**windIO v2**](https://github.com/IEAWindSystems/windIO) wind-turbine
 The 1D-shell YAML and the 2D-solid YAML feed the [OpenSG-TW](https://github.com/bagla0/OpenSG-TW)
 homogenizers so a single windIO blade can be cross-checked shell-vs-solid at every station.
 
-## Why PreVABS (not pyNuMAD) for the solid mesh
+## Why PreVABS for the solid mesh
 
 We evaluated both. **PreVABS** is the chosen 2D-solid mesher because it is a self-contained, headless CLI
 that emits a VABS `.sg` with per-element material + layup orientation and matches VABS to ~1e-5.
-**pyNuMAD** was ruled out for this workflow: (1) its windIO reader handles **v1 only**
-(`internal_structure_2d_fem`) — the IEA-22 file is v2 — and there is no v2→v1 converter; (2) its only true
-2D-solid cross-section + per-element-orientation path runs through the commercial **Cubit** kernel and is
-not headless. pyNuMAD's pure-Python mesher produces 3D *blade* meshes, not 2D cross-sections.
 
 ## Install
 
