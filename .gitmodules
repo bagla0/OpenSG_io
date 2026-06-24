@@ -1,0 +1,3 @@
+[submodule "third_party/prevabs"]
+	path = third_party/prevabs
+	url = https://github.com/wenbinyugroup/prevabs
