@@ -3,7 +3,7 @@
   <analysis><model>1</model></analysis>
   <general>
     <scale>4.860706</scale>
-    <mesh_size>0.01</mesh_size>
+    <mesh_size>0.02</mesh_size>
     <element_type>linear</element_type>
   </general>
   <baselines>
@@ -36,12 +36,12 @@
     <line name="bl_11"><points>d11:d12</points></line>
     <line name="bl_12"><points>d12:d13</points></line>
     <line name="bl_te"><points>d13:d0</points></line>
-    <point name="wp_0">0.699068  0</point>
-    <line name="bl_web_0"><point>wp_0</point><angle>90</angle></line>
-    <point name="wp_1">0.158379  0</point>
-    <line name="bl_web_1"><point>wp_1</point><angle>90</angle></line>
-    <point name="wp_2">0.322110  0</point>
-    <line name="bl_web_2"><point>wp_2</point><angle>90</angle></line>
+    <point name="wp_0">0.698011 0.020293</point>
+    <line name="bl_web_0"><point>wp_0</point><angle>88.9313</angle></line>
+    <point name="wp_1">0.155928 0.002182</point>
+    <line name="bl_web_1"><point>wp_1</point><angle>88.8491</angle></line>
+    <point name="wp_2">0.319336 -0.000088</point>
+    <line name="bl_web_2"><point>wp_2</point><angle>88.8508</angle></line>
   </baselines>
   <layups>
     <layup name="layup_0">

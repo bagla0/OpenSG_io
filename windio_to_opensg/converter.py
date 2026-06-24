@@ -367,12 +367,19 @@ def emit_prevabs(cs, outdir, name="xsec", mesh_size=0.005):
     comps += ('    <segment name="sg_te">\n      <baseline>bl_te</baseline>\n      <layup>layup_%d</layup>\n    </segment>\n'
               % te_first["set_id"])
 
-    # 5. webs: point at normalised x + vertical line (angle 90); component per web
+    # 5. webs: a point on the web line (midpoint of the two attachments) + the ACTUAL web angle from those
+    #    attachments (NOT hardcoded 90: the windIO webs are tilted up to ~9deg at the root, so a vertical
+    #    PreVABS web would not match the 1D shell, which connects the true suction<->pressure points).
     web_xml = ""; web_comp = ""
     for wi, w in enumerate(cs["webs"]):
-        wx = xn(w["s"])
-        web_xml += ('    <point name="wp_%d">%.6f  0</point>\n'
-                    '    <line name="bl_web_%d"><point>wp_%d</point><angle>90</angle></line>\n' % (wi, wx, wi, wi))
+        Ps = np.asarray(cs["nodes"][w["a"]], float); Pe = np.asarray(cs["nodes"][w["b"]], float)
+        if Ps[1] < Pe[1]:
+            Ps, Pe = Pe, Ps                                # Ps = upper (suction) attachment
+        ang = float(np.degrees(np.arctan2(Ps[1] - Pe[1], Ps[0] - Pe[0])))   # web-line angle (90 = vertical)
+        M = 0.5 * (Ps + Pe) / chord                        # midpoint on the web line, normalised
+        web_xml += ('    <point name="wp_%d">%.6f %.6f</point>\n'
+                    '    <line name="bl_web_%d"><point>wp_%d</point><angle>%.4f</angle></line>\n'
+                    % (wi, M[0], M[1], wi, wi, ang))
         web_comp += ('  <component name="web_%d" depend="surface">\n    <segment name="sg_web_%d">\n'
                      '      <baseline>bl_web_%d</baseline>\n      <layup>layup_%d</layup>\n    </segment>\n  </component>\n'
                      % (wi, wi, wi, w["lam"]))
