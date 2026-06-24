@@ -228,21 +228,31 @@ def emit_opensg_yaml(cs, out_path, web_mesh=None):
     web_mesh = web_mesh if web_mesh else 0.01 * chord
     set_of_lam = {v: k for k, v in cs["laminates"].items()}   # set index -> laminate tuple
 
-    # build web node chains
+    # build web node chains.  Order each web bottom(-y3) -> top(+y3) so e2 = +y3 matches the PreVABS web
+    # baseline (<angle>90</angle> = +y3); then e3 = e1 x e2 = -y2 agrees with the 2D-solid web frame.
     for w in cs["webs"]:
-        Pa, Pb = nodes[w["a"]].copy(), nodes[w["b"]].copy()
+        a, b = w["a"], w["b"]
+        if nodes[a][1] > nodes[b][1]:                        # lower-y node first (bottom -> top)
+            a, b = b, a
+        Pa, Pb = nodes[a].copy(), nodes[b].copy()
         nseg = max(2, int(round(np.linalg.norm(Pb - Pa) / web_mesh)))
         ts = np.linspace(0, 1, nseg + 1)
-        chain = [w["a"]]
+        chain = [a]
         for t in ts[1:-1]:
             nodes.append(Pa + t * (Pb - Pa)); chain.append(len(nodes) - 1)
-        chain.append(w["b"])
+        chain.append(b)
         for ia, ib in zip(chain[:-1], chain[1:]):
             elems.append((ia, ib)); elem_lam.append(w["lam"])
 
-    nodes = np.array(nodes); C = nodes.mean(axis=0)
+    nodes = np.array(nodes)
     nsets = len(cs["laminates"])
     web_sets = {w["lam"] for w in cs["webs"]}
+    # consistent skin inward normal (OML->IML) from the CLOSED-LOOP ORIENTATION. Robust at the TE, where the
+    # old "point e3 toward the centroid" heuristic was unstable: there the skins are ~horizontal so the local
+    # normal is ~vertical, while (C - element) is ~horizontal -> dot ~ 0 -> spurious e3 flips near the TE.
+    skin_xy = np.asarray(cs["nodes"])
+    area2 = float(np.sum(skin_xy[:, 0] * np.roll(skin_xy[:, 1], -1) - np.roll(skin_xy[:, 0], -1) * skin_xy[:, 1]))
+    inward = 1.0 if area2 > 0 else -1.0            # e3=[-e2y,e2x] is inward for a CCW loop; flip for CW
 
     seg = {"nodes": [], "elements": [], "sets": {"element": []}, "sections": [],
            "elementOrientations": [], "materials": []}
@@ -260,9 +270,8 @@ def emit_opensg_yaml(cs, out_path, web_mesh=None):
         P1, P2 = nodes[n1], nodes[n2]
         e2 = (P2 - P1) / (np.linalg.norm(P2 - P1) + 1e-30)
         e3 = np.array([-e2[1], e2[0]])
-        if elem_lam[ei] not in web_sets:                   # skin: e3 inward (OML->IML)
-            if np.dot(e3, C - 0.5 * (P1 + P2)) < 0:
-                e3 = -e3
+        if elem_lam[ei] not in web_sets:                   # skin: consistent loop-orientation inward normal
+            e3 = inward * e3
         seg["elementOrientations"].append(_Flow([0.0, 0.0, 1.0, float(e2[0]), float(e2[1]), 0.0,
                                                   float(e3[0]), float(e3[1]), 0.0]))
     used = []
@@ -284,13 +293,12 @@ def emit_opensg_yaml(cs, out_path, web_mesh=None):
 def _mat_xml(blade, name):
     m = blade.mats[name]
     E, G, nu, rho = m["E"], m["G"], m["nu"], float(m.get("rho", 1.0))
-    if isinstance(E, (list, tuple)):
-        return ('  <material name="%s" type="orthotropic">\n    <density>%g</density>\n    <elastic>\n'
-                '      <e1>%g</e1><e2>%g</e2><e3>%g</e3>\n      <g12>%g</g12><g13>%g</g13><g23>%g</g23>\n'
-                '      <nu12>%g</nu12><nu13>%g</nu13><nu23>%g</nu23>\n    </elastic>\n  </material>\n'
-                % (name, rho, E[0], E[1], E[2], G[0], G[1], G[2], nu[0], nu[1], nu[2]))
-    return ('  <material name="%s" type="isotropic">\n    <density>%g</density>\n    <elastic>\n'
-            '      <e>%g</e><nu>%g</nu>\n    </elastic>\n  </material>\n' % (name, rho, E, nu))
+    if not isinstance(E, (list, tuple)):           # isotropic -> replicate (windIO G == E/2(1+nu), exact);
+        E = [E, E, E]; G = [G, G, G]; nu = [nu, nu, nu]   # uniform orthotropic cards keep the .sg parser happy
+    return ('  <material name="%s" type="orthotropic">\n    <density>%g</density>\n    <elastic>\n'
+            '      <e1>%g</e1><e2>%g</e2><e3>%g</e3>\n      <g12>%g</g12><g13>%g</g13><g23>%g</g23>\n'
+            '      <nu12>%g</nu12><nu13>%g</nu13><nu23>%g</nu23>\n    </elastic>\n  </material>\n'
+            % (name, rho, E[0], E[1], E[2], G[0], G[1], G[2], nu[0], nu[1], nu[2]))
 
 
 def emit_prevabs(cs, outdir, name="xsec", mesh_size=0.005):

@@ -1,8 +1,10 @@
 <materials>
-  <material name="gelcoat" type="isotropic">
+  <material name="gelcoat" type="orthotropic">
     <density>1235</density>
     <elastic>
-      <e>3.44e+09</e><nu>0.3</nu>
+      <e1>3.44e+09</e1><e2>3.44e+09</e2><e3>3.44e+09</e3>
+      <g12>1.323e+09</g12><g13>1.323e+09</g13><g23>1.323e+09</g23>
+      <nu12>0.3</nu12><nu13>0.3</nu13><nu23>0.3</nu23>
     </elastic>
   </material>
   <material name="glass_triax" type="orthotropic">
@@ -21,10 +23,12 @@
       <nu12>0.262</nu12><nu13>0.264</nu13><nu23>0.35</nu23>
     </elastic>
   </material>
-  <material name="medium_density_foam" type="isotropic">
+  <material name="medium_density_foam" type="orthotropic">
     <density>130</density>
     <elastic>
-      <e>1.425e+08</e><nu>0.3194</nu>
+      <e1>1.425e+08</e1><e2>1.425e+08</e2><e3>1.425e+08</e3>
+      <g12>5.4e+07</g12><g13>5.4e+07</g13><g23>5.4e+07</g23>
+      <nu12>0.3194</nu12><nu13>0.3194</nu13><nu23>0.3194</nu23>
     </elastic>
   </material>
   <material name="carbon_uniax" type="orthotropic">
