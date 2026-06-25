@@ -13,3 +13,7 @@ out/
 *.vabs
 # keep the curated benchmark examples under examples/ (do NOT ignore those)
 !examples/**
+
+# Sphinx build output
+docs/_build/
+docs/jupyter_execute/
