@@ -1,0 +1,15 @@
+# iea22 RM-regime guard: can RM 1D-shell REPLACE the 2D-solid at this station?
+# thresholds: t/h<5%=RM-FULL, 5-8%=shear-watch, >=8%=SOLID-CHECK; soft-core (Gmin<1.0e+00GPa)
+# t_core/h = soft-core thickness / airfoil height (sandwich shear relevance at section level)
+# r   t_max/h%  t_core/h%  core_mm  sandwich  verdict  note
+0.10  2.06  1.81  75.9  1  RM-FULL  5.5  trust all 6x6 terms
+0.20  3.41  2.75  70.6  1  RM-FULL  4.7  trust all 6x6 terms
+0.30  4.02  2.88  61.2  1  RM-FULL  6.0  trust all 6x6 terms
+0.40  4.65  2.96  51.9  1  RM-FULL  4.9  trust all 6x6 terms
+0.50  5.44  3.14  42.5  1  RM-OK*shear-watch  5.5  EA/EI/GJ trusted; GA2/GA3 may be ~5-10% off (t/h 5.4%)
+0.60  6.18  3.28  33.1  1  RM-OK*shear-watch  6.8  EA/EI/GJ trusted; GA2/GA3 may be ~5-10% off (t/h 6.2%)
+0.70  6.46  3.89  30.0  1  RM-OK*shear-watch  7.0  EA/EI/GJ trusted; GA2/GA3 may be ~5-10% off (t/h 6.5%)
+0.80  5.71  4.83  30.0  1  RM-OK*shear-watch  6.8  EA/EI/GJ trusted; GA2/GA3 may be ~5-10% off (t/h 5.7%)
+0.90  7.16  6.32  30.0  1  RM-OK*shear-watch  7.3  EA/EI/GJ trusted; GA2/GA3 may be ~5-10% off (t/h 7.2%, t_core/h 6.3%)
+0.95  9.16  8.09  30.0  1  SOLID-CHECK  24.4  keep 2D-solid for GA2/GA3 (+ junction terms); thick wall t/h>=8%, soft core t_core/h>=8%
+#SUMMARY: 4 RM-FULL, 5 shear-watch, 1 SOLID-CHECK  (of 10 stations)

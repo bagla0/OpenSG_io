@@ -76,6 +76,28 @@ The validated mid-span (r = 0.50) Timoshenko diagonals (SI: N, N*m, N*m^2):
 | EI2  | 7.354e9  | 7.354e9  | 7.115e9  |
 | EI3  | 6.296e10 | 6.296e10 | 6.260e10 |
 
+## When is RM valid as a solid-replacement? (regime guard)
+
+RM-shell departs from the 2D-solid only when a wall can no longer be collapsed to a single reference
+surface. The **transverse-shear stiffnesses (GA2/GA3)** degrade first; the design-driving terms (EA, EI,
+GJ, in-plane couplings) stay robust. The breakdown cases, in order of relevance to a real blade: thick
+walls / thick root, **soft-core sandwich panels**, web/T-junctions, the transverse-coupled part of strongly
+off-axis plies, and extreme curvature. (RM is the right choice over KL precisely because KL *collapses* on
+the shear/junction terms while RM stays bounded.)
+
+A per-station **operating rule**, calibrated to the measured IEA-22 data (`validation/iea22_rm_regime.dat`):
+
+| `t_max/h` | verdict | meaning |
+|-----------|---------|---------|
+| < 5%      | **RM-FULL**    | trust all 6x6 terms |
+| 5 - 8%    | **shear-watch** | trust EA/EI/GJ; GA2/GA3 may be ~5-10% off |
+| >= 8% (or soft-core `t_core/h` >= 8%) | **SOLID-CHECK** | keep the 2D-solid for GA2/GA3 (+ junction terms) |
+
+For the IEA-22 blade this flags **4 RM-FULL, 5 shear-watch, 1 SOLID-CHECK** — only the very tip (r=0.95,
+`t/h` 9.2%) needs the solid; RM replaces it everywhere else. The verdict tracks the measured RM error
+monotonically (RM-FULL 4.7-6.0%, shear-watch 5.5-7.3%, the lone SOLID-CHECK = the 24% tip), so the rule
+predicts where the solid is actually needed. See `validation/iea22_rm_regime.dat`.
+
 ## Regenerate / extend
 
 ```bash
