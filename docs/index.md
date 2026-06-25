@@ -32,6 +32,7 @@ python scripts/opensg_io.py BAR_URC_ElastoDyn_blade.dat out                     
 
 installation
 inputs
+tutorials/iea22_tutorial
 tutorials/windio
 tutorials/prevabs_xml
 tutorials/openfast

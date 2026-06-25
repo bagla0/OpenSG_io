@@ -9,14 +9,15 @@ copyright = "2026, Akshat Bagla (bagla0). Built with Claude."
 release = "0.3.0"
 
 extensions = [
-    "myst_parser",
+    "myst_nb",                       # markdown (MyST) + Jupyter notebooks (.ipynb)
     "sphinx.ext.autodoc",
     "sphinx.ext.napoleon",
     "sphinx.ext.viewcode",
     "sphinx.ext.intersphinx",
 ]
 myst_enable_extensions = ["colon_fence", "deflist", "fieldlist"]
-source_suffix = {".md": "markdown", ".rst": "restructuredtext"}
+nb_execution_mode = "off"            # notebooks are committed pre-executed -> render stored outputs
+source_suffix = {".md": "myst-nb", ".ipynb": "myst-nb", ".rst": "restructuredtext"}
 master_doc = "index"
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
 
