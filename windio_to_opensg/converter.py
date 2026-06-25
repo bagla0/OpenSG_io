@@ -24,7 +24,7 @@ Conventions:
 import os
 import sys
 import numpy as np
-import windIO
+# windIO is imported lazily inside WindIOBlade (v2 only) so v1 blades (plain yaml) need no windIO package.
 
 
 def interp(spec, r):
@@ -43,6 +43,7 @@ def arc_param(xy):
 
 class WindIOBlade:
     def __init__(self, yaml_path):
+        import windIO                                       # v2 only -- v1 (WindIOBladeV1) needs no windIO
         self.d = windIO.load_yaml(yaml_path)
         self.bl = self.d["components"]["blade"]
         self.osh = self.bl["outer_shape"]
