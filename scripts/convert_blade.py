@@ -28,6 +28,9 @@ def main():
     ap.add_argument("--nstations", type=int, default=10)
     ap.add_argument("--shell-ms", type=float, default=0.01)
     ap.add_argument("--solid-ms", type=float, default=0.02)
+    ap.add_argument("--fraction", type=float, default=0.5,
+                    help="shell reference-surface through-thickness fraction from the OML "
+                         "(0.5 = mid-surface / centre reference; 0.0 = OML)")
     ap.add_argument("--solid", action="store_true", help="also build the 2D-solid via PreVABS")
     ap.add_argument("--prevabs", default=None, help="prevabs path (default: repo third_party/prevabs_bin)")
     a = ap.parse_args()
@@ -48,7 +51,8 @@ def main():
             cs = build_cross_section(blade, r, mesh_size=a.shell_ms)
         except Exception as e:
             print("r=%.2f BUILD FAILED: %s" % (r, repr(e)[:90]), flush=True); continue
-        emit_opensg_yaml(cs, os.path.join(a.outdir, "shell_%s_%s.yaml" % (name, tag)))
+        emit_opensg_yaml(cs, os.path.join(a.outdir, "shell_%s_%s.yaml" % (name, tag)),
+                         fraction=a.fraction)
         msg = "r=%.2f chord=%.3f shell:%d elems [%d lam,%d webs]" % (
             r, cs["chord"], len(cs["elems"]), len(cs["laminates"]), len(cs["webs"]))
         if a.solid:

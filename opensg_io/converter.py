@@ -290,14 +290,49 @@ def _mat_block(blade, name):
                 elastic=dict(E=[float(x) for x in E], G=[float(x) for x in G], nu=[float(x) for x in nu]))
 
 
-def emit_opensg_yaml(cs, out_path, web_mesh=None):
+def emit_opensg_yaml(cs, out_path, web_mesh=None, fraction=0.5):
     """Write the OpenSG 1D-shell SG YAML. Adds web node-chains; e1=+z, e2=tangent, e3 inward (skin) /
-    e1xe2 (web)."""
+    e1xe2 (web).
+
+    fraction: through-thickness position of the shell REFERENCE surface, measured from the OML
+    (the airfoil curve) inward as a fraction of the local laminate thickness.  0.5 (default) puts
+    the contour on the laminate mid-surface = the centre reference the RM/Kirchhoff shell models
+    assume; 0.0 leaves it on the OML.  The offset is applied to the SKIN nodes before the webs are
+    built (so webs stay attached to the offset skin); the 2-D solid (emit_prevabs) is unaffected --
+    it keeps the OML and lays the ply inward, so both models remain centred on the same wall."""
     blade = cs["blade"]; chord = cs["chord"]
     nodes = [np.asarray(p, float) for p in cs["nodes"]]
     elems = list(cs["elems"]); elem_lam = list(cs["elem_lam"])
     web_mesh = web_mesh if web_mesh else 0.01 * chord
     set_of_lam = {v: k for k, v in cs["laminates"].items()}   # set index -> laminate tuple
+
+    # ---- reference-surface offset: move the SKIN contour from the OML to the laminate reference
+    # surface at through-thickness `fraction` (0.5 = mid-surface / centre reference).  For a thick
+    # wall the OML is t/2 outside the mid-surface, which spuriously stiffens the shell; at 0.5 the
+    # contour lands on the wall centre where the shell ABD is referenced.
+    nskin = len(cs["nodes"])
+    web_sets_pre = {w["lam"] for w in cs["webs"]}
+    skin_xy0 = np.asarray(cs["nodes"])
+    area2 = float(np.sum(skin_xy0[:, 0] * np.roll(skin_xy0[:, 1], -1)
+                         - np.roll(skin_xy0[:, 0], -1) * skin_xy0[:, 1]))
+    inward0 = 1.0 if area2 > 0 else -1.0                       # e3=[-e2y,e2x] inward for CCW loop
+    if fraction:
+        acc_n = np.zeros((nskin, 2)); acc_t = np.zeros(nskin); acc_c = np.zeros(nskin)
+        for ei, (n1, n2) in enumerate(elems):
+            if elem_lam[ei] in web_sets_pre:
+                continue                                      # skin elements only
+            e2 = nodes[n2] - nodes[n1]; e2 = e2 / (np.linalg.norm(e2) + 1e-30)
+            nin = inward0 * np.array([-e2[1], e2[0]])
+            tlam = float(sum(t for (_m, t, _a) in set_of_lam[elem_lam[ei]]))
+            for nd in (n1, n2):
+                if nd < nskin:
+                    acc_n[nd] += nin; acc_t[nd] += tlam; acc_c[nd] += 1.0
+        offs = [np.asarray(p, float) for p in nodes]
+        for i in range(nskin):
+            if acc_c[i] > 0 and np.linalg.norm(acc_n[i]) > 1e-12:
+                nrm = acc_n[i] / np.linalg.norm(acc_n[i])
+                offs[i] = nodes[i] + fraction * (acc_t[i] / acc_c[i]) * nrm
+        nodes = offs
 
     # build web node chains.  Order each web bottom(-y3) -> top(+y3) so e2 = +y3 matches the PreVABS web
     # baseline (<angle>90</angle> = +y3); then e3 = e1 x e2 = -y2 agrees with the 2D-solid web frame.
