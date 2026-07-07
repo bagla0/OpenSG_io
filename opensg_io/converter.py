@@ -201,6 +201,12 @@ def build_cross_section(blade, r, mesh_size=0.01):
                 brks.add(float(np.clip(v, 0, 1)))
     for w in webs:
         brks.add(float(np.clip(w["s"], 0, 1))); brks.add(float(np.clip(w["e"], 0, 1)))
+    # a single full-contour skin (no webs, no partial plies) has only the {0,1} end
+    # breakpoints, which are not PreVABS dividing points -> the TE-wrap segment logic
+    # keys pn[0.0] and crashes.  Inject interior dividing points so the closed skin is
+    # covered by >=2 baselines carrying the same layup (physics unchanged).
+    if len([v for v in brks if 1e-6 < v < 1 - 1e-6]) < 2:
+        brks |= {0.25, 0.5, 0.75}
     brks = np.array(sorted(brks))
 
     def laminate_at(smid):
