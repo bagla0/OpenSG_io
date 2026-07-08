@@ -1,18 +1,52 @@
 """opensg_io.mesh3d -- 3D solid-mesh generation for tapered thin-walled sections, with a
 mandatory conformity gate on every export (see opensg_io.conformity).
 
-Generators return (nodes, cells, celltype[, tags]); export_solid_yaml() runs
-assert_conforming() BEFORE writing, so a non-conforming mesh (e.g. a webbed hex whose web
-divisions do not match the skin at the T-junction) is never written to disk.
+Two ways to turn a 2D cross-section into a 3D solid:
+  * HexGen (structured, PREFERRED for thin walls) -- loft_to_hex(): stack a 2D QUAD
+    cross-section at nsp+1 span stations and connect each quad to the same quad at the next
+    station -> structured 8-node hexes marching root->tip.  A conforming quad mesh lofts to a
+    conforming hex mesh; the through-wall resolution is exact (n regular layers), so it
+    captures transverse shear (unlike a coarse tet).
+  * TetGen (unstructured, robust for arbitrary boundaries) -- opensg_io.tapered_tet: gmsh
+    lofts the boundary SURFACE, TetGen fills the interior with Delaunay tets.
 
-  webbed_ellipse_hex(...) -> conforming const-thickness webbed-ellipse HEX (skin annulus +
-      vertical webs at x=c*a).  Conformity: the web's top/bottom rows ARE inner-skin nodes.
-      Const web thickness under the taper: the skin circumferential parametrization is rebuilt
-      per station so each web-attachment arc keeps a constant x-width t.
+The 2D cross-section itself comes from the core mesher (gmsh) or PreVABS
+(opensg_io.prevabs_webbed_ellipse).  Generators return (nodes, cells[, tags]);
+export_solid_yaml() runs assert_conforming() BEFORE writing, so a non-conforming mesh is
+never written.
+
+  webbed_ellipse_hex(...) -> conforming const-thickness webbed-ellipse HEX = build the 2D quad
+      cross-section (skin annulus + web plates; web top/bottom rows ARE inner-skin nodes;
+      const web thickness kept by rebuilding the skin parametrization per station) then
+      loft_to_hex it along the span.
 """
 import math
 import numpy as np
 from .conformity import assert_conforming, conformity_report
+
+
+def loft_to_hex(station_fn, faces2d, nsp, L=2.0):
+    """Structured 8-node HEX mesh by lofting a 2D QUAD cross-section along the span.
+
+    This is the structured alternative to a TetGen fill: instead of randomly filling the
+    interior with tets, we stack the cross-section at nsp+1 span stations and connect each
+    quad at station s to the SAME quad at station s+1 -> one 8-node hex per quad per span
+    slice, marching linearly from one end to the other.  A conforming 2D quad mesh lofts to a
+    conforming hex mesh automatically (shared quad edges -> shared hex faces, no hanging nodes).
+
+      station_fn(z) -> (NP,3) node coords of the cross-section at span position z (SAME node
+                       ordering/topology at every station; apply the taper here).
+      faces2d        -> (M,4) quad connectivity into that node ordering.
+      returns (nodes, hexes): nodes stacked station-major, hexes (nsp*M, 8) in VTK order.
+    """
+    stations = [station_fn(L * s / nsp) for s in range(nsp + 1)]
+    NP = len(stations[0])
+    nodes = np.vstack(stations)
+    q = np.asarray(faces2d, int)
+    hexes = np.empty((nsp * len(q), 8), int)
+    for s in range(nsp):
+        hexes[s * len(q):(s + 1) * len(q)] = np.hstack([s * NP + q, (s + 1) * NP + q])
+    return nodes, hexes
 
 
 def webbed_ellipse_hex(t, A0=1.0, A1=0.65, B0=0.60, B1=0.42, L=2.0, webs=(0.5, 0.0, -0.5),
@@ -87,26 +121,20 @@ def webbed_ellipse_hex(t, A0=1.0, A1=0.65, B0=0.60, B1=0.42, L=2.0, webs=(0.5, 0
                     P[wid(wk, j, m), :2] = pt + (m / NY[wk]) * (pb - pt)
         return P
 
-    nodes = np.vstack([station(L * sp / nsp) for sp in range(nsp + 1)])
-
-    def gid(sp, lid):
-        return sp * NP + lid
-
-    hexes, is_web = [], []
-    for sp in range(nsp):
-        for i in range(NC):
-            ii = (i + 1) % NC
-            for l in range(nr):
-                q = [sid(i, l), sid(ii, l), sid(ii, l + 1), sid(i, l + 1)]
-                hexes.append([gid(sp, x) for x in q] + [gid(sp + 1, x) for x in q]); is_web.append(0)
-        for wk in range(3):
-            def wn(j, m):
-                return sid(WT[wk][j], 0) if m == 0 else sid(WB[wk][j], 0) if m == NY[wk] else wid(wk, j, m)
-            for j in range(len(WT[wk]) - 1):
-                for m in range(NY[wk]):
-                    q = [wn(j, m), wn(j + 1, m), wn(j + 1, m + 1), wn(j, m + 1)]
-                    hexes.append([gid(sp, x) for x in q] + [gid(sp + 1, x) for x in q]); is_web.append(1)
-    return nodes, np.array(hexes), np.array(is_web)
+    # Build the 2D QUAD cross-section ONCE (skin annulus + web plates), then loft it to hexes.
+    faces2d, face_web = [], []
+    for i in range(NC):                                    # skin annulus quads
+        ii = (i + 1) % NC
+        for l in range(nr):
+            faces2d.append([sid(i, l), sid(ii, l), sid(ii, l + 1), sid(i, l + 1)]); face_web.append(0)
+    for wk in range(3):                                    # web-plate quads
+        def wn(j, m):
+            return sid(WT[wk][j], 0) if m == 0 else sid(WB[wk][j], 0) if m == NY[wk] else wid(wk, j, m)
+        for j in range(len(WT[wk]) - 1):
+            for m in range(NY[wk]):
+                faces2d.append([wn(j, m), wn(j + 1, m), wn(j + 1, m + 1), wn(j, m + 1)]); face_web.append(1)
+    nodes, hexes = loft_to_hex(station, faces2d, nsp, L)   # <-- structured span loft, not TetGen
+    return nodes, hexes, np.tile(face_web, nsp)
 
 
 def export_solid_yaml(path, nodes, cells, celltype, orientations, materials, sets=None):

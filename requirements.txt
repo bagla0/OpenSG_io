@@ -1,0 +1,14 @@
+# OpenSG_io dependencies
+numpy
+scipy
+pyyaml
+meshio
+
+# Core mesher: gmsh (https://gitlab.onelab.info/gmsh/gmsh) -- OCC geometry + transfinite
+# structured meshing + Delaunay + size fields.  Foundation for OpenSG_io's own XML-driven
+# HexGen (loft_to_hex) and TetGen (tapered_tet) 3D solid generators.
+gmsh
+
+# TetGen Python bindings (unstructured tet fill of a watertight boundary surface)
+tetgen
+pyvista
