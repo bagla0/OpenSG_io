@@ -25,8 +25,8 @@ from opensg_io.mesh3d import export_solid_yaml
 from opensg_io.conformity import assert_conforming
 import yaml
 
-WINDIO = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser(
-    "~/OpenSG-TW-claude/examples/data/windio/IEA-22-280-RWT.yaml")
+WINDIO = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
+    HERE, "data", "IEA-22-280-RWT.yaml")
 R1, R2 = 0.2, 0.3
 NR, NSP, NW, MESH = 4, 12, 2, 0.02
 
