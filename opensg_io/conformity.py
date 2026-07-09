@@ -104,3 +104,22 @@ def assert_conforming(nodes, cells, celltype="hex"):
         raise NonConformingMesh("mesh is NOT conforming (hanging nodes / non-manifold "
                                 "interfaces) -- refusing to export.\n  " + conformity_report(rep))
     return rep
+
+
+HEX_CORNERS = [(0, 1, 3, 4), (1, 2, 0, 5), (2, 3, 1, 6), (3, 0, 2, 7),
+               (4, 7, 5, 0), (5, 4, 6, 1), (6, 5, 7, 2), (7, 6, 4, 3)]
+
+
+def min_scaled_jacobian(nodes, hexes):
+    """Min scaled corner Jacobian over all hexes (VTK ordering): the det of the three
+    normalized edge vectors at each of the 8 corners.  1 = perfect cube, <= 0 = inverted
+    (NuMAD repairs inversion with the same det check, NuMesh3D.m:61-98; we assert it)."""
+    X = np.asarray(nodes, float)[np.asarray(hexes, int)]
+    mins = np.full(len(X), np.inf)
+    for (c, a, b, t) in HEX_CORNERS:
+        e1 = X[:, a] - X[:, c]; e2 = X[:, b] - X[:, c]; e3 = X[:, t] - X[:, c]
+        det = np.einsum("ij,ij->i", np.cross(e1, e2), e3)
+        scale = (np.linalg.norm(e1, axis=1) * np.linalg.norm(e2, axis=1)
+                 * np.linalg.norm(e3, axis=1))
+        mins = np.minimum(mins, det / np.where(scale > 1e-300, scale, 1.0))
+    return float(mins.min()), int((mins <= 0.0).sum())

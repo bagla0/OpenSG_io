@@ -22,6 +22,7 @@ import math
 import numpy as np
 
 from .conformity import assert_conforming
+from .section_offset import offset_rings
 
 
 # --------------------------------------------------------------------------- skeleton
@@ -112,7 +113,7 @@ def _contour_pt(cs, s):
 def build_station(cs, skel, si, nr=4):
     """Realize the canonical skeleton at ONE station.
 
-    Returns dict(hoop_s, oml, nrm, tnode, nodesec (NP,2), webcols, NY, ...) plus the
+    Returns dict(hoop_s, oml, rings, fscale, tnode, NC) plus the
     section topology helpers shared by all stations (ids are identical by construction)."""
     breaks = skel["breaks"][si]
     counts, kinds = skel["counts"], skel["kinds"]
@@ -125,21 +126,22 @@ def build_station(cs, skel, si, nr=4):
     NC = len(hoop_s)
 
     oml = np.array([_contour_pt(cs, s) for s in hoop_s])
-    # outward normal from the hoop tangent, oriented away from the section centroid
-    cen = oml.mean(0)
-    nxt = oml[(np.arange(NC) + 1) % NC] - oml[np.arange(NC) - 1]
-    nrm = np.column_stack([nxt[:, 1], -nxt[:, 0]])
-    nrm /= np.linalg.norm(nrm, axis=1)[:, None]
-    flip = np.einsum("ij,ij->i", nrm, oml - cen) < 0
-    nrm[flip] *= -1.0
 
     # local wall thickness per hoop node = mean of the two adjacent intervals' laminates
+    # (NuMAD getSolidMesh averages the offset distance over the element sets sharing a
+    # node, BladeDef.m:1692-1694 -- same device, prevents layer crossing at panel breaks)
     tint = []
     for k, kind in enumerate(kinds):
         sid = kind[1] if kind[0] == "skin" else _set_at(cs, 0.5 * (breaks[k] + breaks[k + 1]))
         tint.append(_thick(_lam_tuple(cs, sid)))
     tnode = np.array([0.5 * (tint[hoop_kind[i]] + tint[hoop_kind[i - 1]]) for i in range(NC)])
-    return dict(hoop_s=hoop_s, hoop_kind=np.array(hoop_kind), oml=oml, nrm=nrm, tnode=tnode, NC=NC)
+
+    # through-thickness rings by robust PreVABS-style offset: signed-area orientation,
+    # miter (bisector) vertex normals with the Clipper2 limit, and a smoothed thin-gap
+    # clamp so rings never cross the opposite wall at a pinched trailing edge
+    rings, fscale = offset_rings(oml, tnode, nr)
+    return dict(hoop_s=hoop_s, hoop_kind=np.array(hoop_kind), oml=oml, rings=rings,
+                fscale=fscale, tnode=tnode, NC=NC)
 
 
 def _band_cols(skel, kinds_index):
@@ -205,7 +207,7 @@ def build_section_mesh(cs_list, skel, nr=4, ny_target=None):
         P = np.zeros((NP, 3))
         for i in range(NC):
             for l in range(nr + 1):
-                P[sid(i, l), :2] = s["oml"][i] - (l / nr) * s["tnode"][i] * s["nrm"][i]
+                P[sid(i, l), :2] = s["rings"][l, i]
         for wi in range(len(webs0)):
             top, bot = wpair[wi]; NY = NYs[wi]
             for j in range(len(top)):
@@ -231,7 +233,19 @@ def build_section_mesh(cs_list, skel, nr=4, ny_target=None):
             for m in range(NY):
                 faces2d.append([wn(wi, j, m), wn(wi, j + 1, m), wn(wi, j + 1, m + 1), wn(wi, j, m + 1)])
                 ftag.append(("web", wi, j))
-    return dict(faces2d=np.array(faces2d, int), ftag=ftag, stations=stations, NP=NP, NC=NC,
+    # canonical CCW winding of every 2-D face (signed area > 0), so the +z extrusion
+    # always yields right-handed (positive-Jacobian) hexes AND the per-face hoop/depth
+    # tangent e2 has one consistent sense for skin and webs (NuMAD repairs the same
+    # defect post-hoc with a det check + node swap, NuMesh3D.m:61-98 -- we orient at
+    # the source instead)
+    faces2d = np.array(faces2d, int)
+    Q = stations[0][faces2d, :2]                           # (nf, 4, 2)
+    area2 = np.zeros(len(faces2d))
+    for a in range(4):
+        b = (a + 1) % 4
+        area2 += Q[:, a, 0] * Q[:, b, 1] - Q[:, b, 0] * Q[:, a, 1]
+    faces2d[area2 < 0] = faces2d[area2 < 0][:, ::-1]
+    return dict(faces2d=faces2d, ftag=ftag, stations=stations, NP=NP, NC=NC,
                 nr=nr, NYs=NYs, wpair=wpair, st=st, bands=bands)
 
 

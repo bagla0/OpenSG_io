@@ -7,6 +7,10 @@ formats so you don't have to hand-build the SG.
 
 Documentation & tutorials: **https://bagla0.github.io/OpenSG_io/**
 
+**Worked example** → [Build a 3-D tapered blade segment (shell + structured-hex solid)](https://bagla0.github.io/OpenSG_io/tutorials/iea22_tutorial.html):
+takes the IEA-22-280 windIO between `r = 0.2` and `r = 0.3` and produces both SG meshes end-to-end —
+the generation code, printed output, and mesh renders are all in the notebook.
+
 ## Inputs
 
 | input | what OpenSG_io produces |
@@ -62,7 +66,9 @@ ed = read_elastodyn_blade("BAR_URC_ElastoDyn_blade.dat")  # OpenFAST reference (
 ## Validated
 
 - **windIO v2** (IEA-22-280-RWT) and **v1** (NREL BAR-URC) both convert end-to-end; the 1D-shell RM/Kirchhoff
-  and the 2D-solid (FEniCS) agree within ~5% root-to-mid (worked benchmark in [`examples/iea22/`](examples/iea22/)).
+  and the 2D-solid (FEniCS) agree within ~5% root-to-mid (worked benchmark in
+  [`examples/iea22_hex_segment.py`](examples/iea22_hex_segment.py), rendered in the
+  [tutorial](https://bagla0.github.io/OpenSG_io/tutorials/iea22_tutorial.html)).
 - OpenFAST ElastoDyn/BeamDyn reading round-trips against the BAR blade data.
 
 ## Third-party tools

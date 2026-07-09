@@ -49,7 +49,10 @@ nodes, hexes, sec = res["nodes"], res["hexes"], res["sec"]
 print("HEX: %d nodes, %d hexes  (section: %d hoop nodes x %d layers + webs NY=%s)"
       % (len(nodes), len(hexes), sec["NC"], NR, sec["NYs"]), flush=True)
 assert_conforming(nodes, hexes, "hex")
-print("conformity gate (solid): PASS", flush=True)
+from opensg_io.conformity import min_scaled_jacobian
+msj, ninv = min_scaled_jacobian(nodes, hexes)
+assert ninv == 0, "%d inverted hexes" % ninv
+print("conformity gate (solid): PASS   min scaled Jacobian = %.3f (0 inverted)" % msj, flush=True)
 
 # ---- solid yaml (per-hex fiber frames from the ply at that through-thickness depth)
 oris, hmats = solid_yaml_payload(res, cs1)
@@ -170,27 +173,14 @@ shell_path = os.path.join(HERE, "iea22_seg_r020_r030_shell.yaml")
 yaml.safe_dump(shell, open(shell_path, "w"), default_flow_style=None, sort_keys=False)
 print("wrote", shell_path, flush=True)
 
-# ---- renders: section quad mesh + 3-D hex + shell
-fig = plt.figure(figsize=(14, 5))
-ax = fig.add_subplot(121)
-q0 = sec["faces2d"]
-for qq, tg in zip(q0, sec["ftag"]):
-    lp = list(qq) + [int(qq[0])]
-    ax.plot(P1[lp, 0], P1[lp, 1], color=("crimson" if tg[0] == "web" else "0.4"), lw=0.35)
-ax.set_aspect("equal"); ax.set_title("r=0.2 quad cross-section (loft input; webs crimson, junction bands refined)")
-ax3 = fig.add_subplot(122, projection="3d")
-for k in range(0, len(hexes), max(1, len(hexes) // 500)):
-    h = hexes[k]
-    for a, b in [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4),
-                 (0, 4), (1, 5), (2, 6), (3, 7)]:
-        ax3.plot(nodes[[h[a], h[b]], 2], nodes[[h[a], h[b]], 0], nodes[[h[a], h[b]], 1],
-                 color=("crimson" if res["htag"][k][0] == "web" else "0.6"), lw=0.25)
-ax3.set_title("IEA-22 segment r=0.2->0.3: structured HEX"); ax3.view_init(16, -75)
-try:
-    ax3.set_box_aspect((2.2, 1, 0.5))
-except Exception:
-    pass
-fig.tight_layout()
+# ---- renders: the ACTUAL r=0.2 section mesh (with TE zoom) + shaded 3-D hex
+from opensg_io.render3d import render_section_png, render_mesh_png
 png = os.path.join(HERE, "iea22_hex_segment.png")
-fig.savefig(png, dpi=100)
+render_section_png(sec, png,
+                   "IEA-22 r=0.2 quad cross-section (loft input; webs crimson, junction bands refined)")
 print("wrote", png, flush=True)
+hsets = {m: i for i, m in enumerate(mat_names)}
+render_mesh_png(nodes, hexes, "hex", np.array([hsets[m] for m in hmats], int),
+                os.path.join(HERE, "iea22_hex_3d.png"),
+                "IEA-22 segment r=0.2->0.3: structured HEX (%d hexes, colored by material)" % len(hexes))
+print("wrote", os.path.join(HERE, "iea22_hex_3d.png"), flush=True)

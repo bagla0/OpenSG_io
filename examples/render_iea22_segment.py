@@ -1,13 +1,17 @@
-"""render_iea22_segment.py -- render the generated IEA-22 r=0.2->0.3 segment meshes,
-read back from the exported YAMLs: shell quad segment + structured solid HEX segment."""
+"""render_iea22_segment.py -- shaded renders of the generated IEA-22 r=0.2->0.3 segment
+meshes, read back from the exported YAMLs: shell quad segment + structured solid HEX
+segment.  Faces are shaded and element edges drawn (render3d), so the individual
+hex/quad elements are visible; the solid's end caps expose the through-thickness
+layers and the webs."""
 import os
+import sys
 import numpy as np
 import yaml
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(HERE))
+from opensg_io.render3d import render_mesh_png
+
 CLoad = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
 
@@ -23,35 +27,13 @@ def load(path):
     return nodes, cells, setmap, names
 
 
-def draw(ax, nodes, cells, edges, color_of, stride, lw):
-    for k in range(0, len(cells), stride):
-        c = cells[k]
-        col = color_of(k)
-        for a, b in edges:
-            ax.plot(nodes[[c[a], c[b]], 2], nodes[[c[a], c[b]], 0], nodes[[c[a], c[b]], 1],
-                    color=col, lw=lw)
-
-
-PAL = ["#666666", "#1f77b4", "#2ca02c", "#ff7f0e", "#9467bd", "#8c564b", "#17becf", "#d62728"]
-QE = [(0, 1), (1, 2), (2, 3), (3, 0)]
-HE = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)]
-
-for kind, fname, edges, stride, lw in (
-        ("shell", "iea22_seg_r020_r030_shell.yaml", QE, 1, 0.3),
-        ("solid", "iea22_seg_r020_r030_solid.yaml", HE, 3, 0.2)):
+for kind, fname in (("shell", "iea22_seg_r020_r030_shell.yaml"),
+                    ("solid", "iea22_seg_r020_r030_solid.yaml")):
     nodes, cells, setmap, names = load(os.path.join(HERE, fname))
-    fig = plt.figure(figsize=(13, 5.5))
-    ax = fig.add_subplot(111, projection="3d")
-    draw(ax, nodes, cells, edges, lambda k: PAL[setmap[k] % len(PAL)], stride, lw)
-    ax.set_title("IEA-22 segment r=0.2$\\rightarrow$0.3 -- %s mesh (%d nodes, %d %s)"
-                 % (kind.upper(), len(nodes), len(cells), "quads" if kind == "shell" else "hexes"))
-    ax.set_xlabel("span z [m]")
-    ax.view_init(16, -75)
-    try:
-        ax.set_box_aspect((2.4, 1, 0.45))
-    except Exception:
-        pass
-    fig.tight_layout()
     out = os.path.join(HERE, "iea22_seg_%s.png" % kind)
-    fig.savefig(out, dpi=110, bbox_inches="tight")
+    title = ("IEA-22 segment r=0.2->0.3 -- %s mesh (%d nodes, %d %s)"
+             % (kind.upper(), len(nodes), len(cells),
+                "quads" if kind == "shell" else "hexes"))
+    render_mesh_png(nodes, cells, "quad" if kind == "shell" else "hex",
+                    setmap, out, title)
     print("wrote", out, flush=True)
