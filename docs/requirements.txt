@@ -1,6 +1,8 @@
-sphinx>=7
-myst-nb>=1
-pydata-sphinx-theme>=0.15
+# Docs build (GitHub Pages). Notebooks are committed pre-executed (nb_execution_mode="off"),
+# so they are NOT re-run; autodoc imports opensg_io with heavy deps mocked.
+sphinx>=7.2
+sphinx-rtd-theme>=3.0
+myst-nb>=1.1
 sphinx-design>=0.5
 sphinx-copybutton>=0.5
 numpy

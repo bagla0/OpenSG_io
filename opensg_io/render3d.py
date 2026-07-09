@@ -126,6 +126,50 @@ def render_mesh_png(nodes, cells, celltype, setmap, png, title):
         return _render_mpl(nodes, cells, celltype, setmap, png, title)
 
 
+def render_section_ends(sec, shell_sec2d, r1, r2, png, title=None):
+    """Cross-section views at BOTH ends for the solid and the shell, as one 2x2 figure:
+    top row = solid section (through-thickness quad mesh, webs crimson) at r1 | r2;
+    bottom row = shell section (mid-surface line + web lines) at r1 | r2.  Rendered
+    from the ACTUAL station coordinates, so taper (chord shrink) is visible."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    q = sec["faces2d"]
+    ftag = sec["ftag"]
+    xy = np.vstack([sec["stations"][0][:, :2], sec["stations"][1][:, :2]])
+    xlo, xhi = xy[:, 0].min(), xy[:, 0].max()
+    ylo, yhi = xy[:, 1].min(), xy[:, 1].max()
+    padx = 0.03 * (xhi - xlo); pady = 0.06 * (yhi - ylo)
+    S = shell_sec2d["S"]; skin_loop = shell_sec2d["skin_loop"]; web_lines = shell_sec2d["web_lines"]
+
+    fig, axs = plt.subplots(2, 2, figsize=(15, 8))
+    for col, (P, r) in enumerate([(sec["stations"][0][:, :2], r1),
+                                  (sec["stations"][1][:, :2], r2)]):
+        ax = axs[0][col]
+        for qq, tg in zip(q, ftag):
+            lp = list(qq) + [int(qq[0])]
+            ax.plot(P[lp, 0], P[lp, 1], color=("crimson" if tg[0] == "web" else "0.35"),
+                    lw=(0.6 if tg[0] == "web" else 0.5))
+        ax.set_title("SOLID hex section  @ r = %.2f" % r)
+        for col2, (Ps, r2v) in enumerate([(S[0], r1), (S[1], r2)]):
+            axs[1][col2].plot(Ps[skin_loop + [skin_loop[0]], 0],
+                              Ps[skin_loop + [skin_loop[0]], 1], "-", color="0.15", lw=1.0)
+            for wl in web_lines:
+                axs[1][col2].plot(Ps[wl, 0], Ps[wl, 1], "-", color="crimson", lw=1.2)
+            axs[1][col2].set_title("SHELL mid-surface section  @ r = %.2f" % r2v)
+    for ax in axs.ravel():
+        ax.set_aspect("equal")
+        ax.set_xlim(xlo - padx, xhi + padx); ax.set_ylim(ylo - pady, yhi + pady)
+        ax.set_xticks([]); ax.set_yticks([])
+    if title:
+        fig.suptitle(title, fontsize=13)
+    fig.tight_layout()
+    fig.savefig(png, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    return png
+
+
 def render_section_png(sec, png, title, te_inset=True):
     """The ACTUAL 2-D station mesh (rings + web columns) with a trailing-edge zoom
     inset, from a build_section_mesh result (station 0)."""

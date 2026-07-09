@@ -22,7 +22,7 @@ import math
 import numpy as np
 
 from .conformity import assert_conforming
-from .section_offset import offset_rings
+from .section_offset import offset_rings, open_thin_gaps
 
 
 # --------------------------------------------------------------------------- skeleton
@@ -136,12 +136,16 @@ def build_station(cs, skel, si, nr=4):
         tint.append(_thick(_lam_tuple(cs, sid)))
     tnode = np.array([0.5 * (tint[hoop_kind[i]] + tint[hoop_kind[i - 1]]) for i in range(NC)])
 
-    # through-thickness rings by robust PreVABS-style offset: signed-area orientation,
-    # miter (bisector) vertex normals with the Clipper2 limit, and a smoothed thin-gap
-    # clamp so rings never cross the opposite wall at a pinched trailing edge
-    rings, fscale = offset_rings(oml, tnode, nr)
-    return dict(hoop_s=hoop_s, hoop_kind=np.array(hoop_kind), oml=oml, rings=rings,
-                fscale=fscale, tnode=tnode, NC=NC)
+    # FULL-ACCURACY trailing edge (NuMAD expandBladeGeometryTEs device): first OPEN the
+    # contour wherever the gap cannot host the full nominal laminate of both walls, so
+    # ply thicknesses are preserved exactly at the TE (commercial benchmark behavior);
+    # then build the through-thickness rings by the robust PreVABS-style miter offset
+    # (signed-area orientation, bisector normals, thin-gap clamp as a mere backstop --
+    # after the opening the clamp should not engage, fscale = 1 everywhere).
+    oml_open, te_moved = open_thin_gaps(oml, tnode, nr=nr)
+    rings, fscale = offset_rings(oml_open, tnode, nr)
+    return dict(hoop_s=hoop_s, hoop_kind=np.array(hoop_kind), oml=oml_open, rings=rings,
+                fscale=fscale, te_moved=te_moved, tnode=tnode, NC=NC)
 
 
 def _band_cols(skel, kinds_index):
@@ -266,7 +270,135 @@ def hex_between_sections(cs1, cs2, z1, z2, nr=4, nsp=12, nw=2, mesh_size=0.02):
     for s in range(nsp):
         hexes[s * len(q):(s + 1) * len(q)] = np.hstack([s * NP + q, (s + 1) * NP + q])
     htag = sec["ftag"] * nsp
-    return dict(nodes=nodes, hexes=hexes, htag=htag, sec=sec, skel=skel)
+    return dict(nodes=nodes, hexes=hexes, htag=htag, sec=sec, skel=skel,
+                z1=z1, z2=z2, nsp=nsp)
+
+
+# ------------------------------------------------------------------- equivalent shell
+def shell_between_sections(res, cs1):
+    """EQUIVALENT mid-surface QUAD shell segment for a hex_between_sections result.
+
+    Same canonical hoop skeleton and span stations as the solid, so shell-vs-solid
+    comparisons are one-to-one.  Skin quads sit on the wall MID-surface (mean of OML
+    and inner ring); each web is a strip of mid-columns whose top/bottom rows are the
+    inner-skin mid nodes (a branched T-junction shared by exactly 3 quads).
+
+    Returns dict(nodes (Ns,3), quads (Nq,4), qlam, qweb, oris (Nq,9), lam_by_id,
+    used_sets, sec2d) where sec2d holds the per-station 2-D section for cross-section
+    plots: dict(S=[S1,S2] (NPs,2), skin_loop (NC,), web_lines list, NPs)."""
+    sec, skel = res["sec"], res["skel"]
+    z1, z2, nsp = res["z1"], res["z2"], res["nsp"]
+    P1, P2 = sec["stations"]
+    NC, nr, NYs, wpair = sec["NC"], sec["nr"], sec["NYs"], sec["wpair"]
+
+    ids = {}
+    for i in range(NC):
+        ids[("s", i)] = len(ids)
+    for wi, NY in enumerate(NYs):
+        for m in range(1, NY):
+            ids[("w", wi, m)] = len(ids)
+    NPs = len(ids)
+
+    def station_shell(P):
+        X = np.zeros((NPs, 2))
+        for i in range(NC):
+            X[ids[("s", i)]] = 0.5 * (P[i * (nr + 1) + 0, :2] + P[i * (nr + 1) + nr, :2])
+        for wi, NY in enumerate(NYs):
+            top, bot = wpair[wi]; jmid = len(top) // 2
+            pt = X[ids[("s", top[jmid])]]; pb = X[ids[("s", bot[jmid])]]
+            for m in range(1, NY):
+                tau = 0.5 * (1 - math.cos(math.pi * m / NY))
+                X[ids[("w", wi, m)]] = (1 - tau) * pt + tau * pb
+        return X
+
+    def wnode(wi, m):
+        top, bot = wpair[wi]; NY = NYs[wi]; jm = len(top) // 2
+        if m == 0:
+            return ids[("s", top[jm])]
+        if m == NY:
+            return ids[("s", bot[jm])]
+        return ids[("w", wi, m)]
+
+    S1, S2 = station_shell(P1), station_shell(P2)
+    snodes = np.zeros(((nsp + 1) * NPs, 3))
+    for s in range(nsp + 1):
+        tau = s / nsp
+        snodes[s * NPs:(s + 1) * NPs, :2] = (1 - tau) * S1 + tau * S2
+        snodes[s * NPs:(s + 1) * NPs, 2] = (1 - tau) * z1 + tau * z2
+
+    hoop_kind = sec["st"][0]["hoop_kind"]; hoop_s = sec["st"][0]["hoop_s"]
+    quads, qlam, qweb = [], [], []
+    for s in range(nsp):
+        for i in range(NC):
+            ii = (i + 1) % NC
+            kind = skel["kinds"][hoop_kind[i]]
+            sid_lam = kind[1] if kind[0] == "skin" else None
+            if sid_lam is None:                            # band strip carries local skin layup
+                sid_lam = [sg["set_id"] for sg in cs1["segments"]
+                           if sg["s_a"] - 1e-9 <= hoop_s[i] <= sg["s_b"] + 1e-9][0]
+            quads.append([s * NPs + ids[("s", i)], s * NPs + ids[("s", ii)],
+                          (s + 1) * NPs + ids[("s", ii)], (s + 1) * NPs + ids[("s", i)]])
+            qlam.append(sid_lam); qweb.append(False)
+        for wi, NY in enumerate(NYs):
+            for m in range(NY):
+                quads.append([s * NPs + wnode(wi, m), s * NPs + wnode(wi, m + 1),
+                              (s + 1) * NPs + wnode(wi, m + 1), (s + 1) * NPs + wnode(wi, m)])
+                qlam.append(cs1["webs"][wi]["lam"]); qweb.append(True)
+    quads = np.array(quads, int)
+
+    oris = np.zeros((len(quads), 9))
+    for k, q in enumerate(quads):
+        gen = snodes[q[3]] - snodes[q[0]]; a1 = gen / np.linalg.norm(gen)
+        e2r = snodes[q[1]] - snodes[q[0]]; e2 = e2r - (e2r @ a1) * a1; e2 /= np.linalg.norm(e2)
+        e3 = np.cross(a1, e2); e3 /= np.linalg.norm(e3)
+        oris[k] = np.concatenate([a1, e2, e3])
+
+    lam_by_id = {sid: lam for lam, sid in cs1["laminates"].items()}
+    skin_loop = [ids[("s", i)] for i in range(NC)]
+    web_lines = [[wnode(wi, m) for m in range(NYs[wi] + 1)] for wi in range(len(NYs))]
+    sec2d = dict(S=[S1, S2], skin_loop=skin_loop, web_lines=web_lines, NPs=NPs)
+    return dict(nodes=snodes, quads=quads, qlam=qlam, qweb=qweb, oris=oris,
+                lam_by_id=lam_by_id, used_sets=sorted(set(qlam)), sec2d=sec2d)
+
+
+def assert_shell_conforming(shell, n_webs, nsp):
+    """Branched mid-surface conformity: no hanging nodes, junction edges shared by
+    EXACTLY 3 quads (skin-left + skin-right + web), none by more; returns the junction
+    edge count (== 2*n_webs*nsp)."""
+    from collections import Counter
+    snodes, quads = shell["nodes"], shell["quads"]
+    used = np.zeros(len(snodes), bool); used[quads.ravel()] = True
+    if not used.all():
+        raise ValueError("hanging shell nodes")
+    ec = Counter()
+    for q in quads:
+        for a, b in ((0, 1), (1, 2), (2, 3), (3, 0)):
+            ec[tuple(sorted((int(q[a]), int(q[b]))))] += 1
+    over = [e for e, c in ec.items() if c > 3]
+    junc = [e for e, c in ec.items() if c == 3]
+    if over:
+        raise ValueError("shell edges shared by >3 quads: %d" % len(over))
+    if len(junc) != 2 * n_webs * nsp:
+        raise ValueError("junction edges %d != expected %d" % (len(junc), 2 * n_webs * nsp))
+    return len(junc)
+
+
+def shell_yaml_payload(shell, blade, mat_block):
+    """Assemble the OpenSG 1-D shell YAML dict from a shell_between_sections result."""
+    snodes, quads = shell["nodes"], shell["quads"]
+    qlam, oris = shell["qlam"], shell["oris"]
+    lam_by_id, used = shell["lam_by_id"], shell["used_sets"]
+    return {"nodes": [["%.9f %.9f %.9f" % tuple(p)] for p in snodes],
+            "elements": [[" ".join(str(v + 1) for v in q)] for q in quads],
+            "sets": {"element": [{"name": "layup_%d" % l,
+                                  "labels": [k + 1 for k, ql in enumerate(qlam) if ql == l]}
+                                 for l in used]},
+            "sections": [{"elementSet": "layup_%d" % l, "type": "shell",
+                          "layup": [[m, float(t), float(a)] for (m, t, a) in lam_by_id[l]]}
+                         for l in used],
+            "elementOrientations": [[float(v) for v in o] for o in oris],
+            "materials": [mat_block(blade, m)
+                          for m in sorted({mm for l in used for (mm, _t, _a) in lam_by_id[l]})]}
 
 
 def _ply_at(lam, frac):

@@ -1,59 +1,11 @@
-/* OpenSG_io brand polish on top of pydata-sphinx-theme */
+/* OpenSG_io docs — light touch on top of sphinx-rtd-theme (same as OpenSG-TW) */
 
-html[data-theme="light"] {
-    --pst-color-primary: #1e40af;
-    --pst-color-secondary: #0e7490;
-    --pst-color-link: #1e40af;
-    --pst-color-link-hover: #06b6d4;
-    --pst-color-inline-code: #0e7490;
-}
-html[data-theme="dark"] {
-    --pst-color-primary: #60a5fa;
-    --pst-color-secondary: #22d3ee;
-    --pst-color-link: #60a5fa;
-    --pst-color-link-hover: #22d3ee;
-}
+/* tables (input matrix, results) compact */
+table.docutils td, table.docutils th { padding: 0.3rem 0.6rem; }
 
-/* Announcement bar -> brand gradient */
-.bd-header-announcement {
-    background: linear-gradient(90deg, #1e40af 0%, #0e7490 50%, #06b6d4 100%);
-    color: #fff;
-    font-weight: 500;
-}
-.bd-header-announcement a { color: #e0f2fe; }
+/* equations breathe a little */
+div.math { margin: 0.8em 0; }
 
-/* Hero heading */
-.display-4 {
-    font-size: clamp(2.4rem, 5vw, 3.4rem);
-    line-height: 1.05;
-    letter-spacing: -0.02em;
-    background: linear-gradient(90deg, #1e40af, #06b6d4);
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
-}
-
-/* Cards: subtle lift on hover, brand accent */
-.sd-card {
-    border: 1px solid var(--pst-color-border, #e2e8f0);
-    border-radius: 12px;
-    transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease;
-}
-.sd-card:hover {
-    transform: translateY(-3px);
-    box-shadow: 0 10px 28px rgba(30, 64, 175, .14);
-    border-color: var(--pst-color-primary);
-}
-.sd-card-title { font-weight: 600; }
-
-/* Navbar brand text */
-.navbar-brand .title { font-weight: 700; letter-spacing: -0.01em; }
-
-/* Primary buttons a touch rounder */
-.sd-btn { border-radius: 8px; font-weight: 600; }
-
-/* Code blocks: softer background + rounded */
-div.highlight { border-radius: 10px; }
-
-/* Tighten the home page hero spacing */
-.bd-main .bd-content h1:first-of-type { margin-top: .5rem; }
+/* card hover (sphinx-design cards on the tutorials index) */
+.sd-card { transition: box-shadow 0.15s ease-in-out; }
+.sd-card:hover { box-shadow: 0 0.4rem 1.1rem rgba(0,0,0,0.12); }

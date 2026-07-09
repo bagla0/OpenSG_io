@@ -1,0 +1,3 @@
+# Generated mesh SG YAMLs are large; regenerate them with `python iea22_segment.py`.
+# (The tutorial notebook embeds the renders, so the PNGs here are the only tracked output.)
+*.yaml

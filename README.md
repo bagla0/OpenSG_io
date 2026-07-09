@@ -67,7 +67,7 @@ ed = read_elastodyn_blade("BAR_URC_ElastoDyn_blade.dat")  # OpenFAST reference (
 
 - **windIO v2** (IEA-22-280-RWT) and **v1** (NREL BAR-URC) both convert end-to-end; the 1D-shell RM/Kirchhoff
   and the 2D-solid (FEniCS) agree within ~5% root-to-mid (worked benchmark in
-  [`examples/iea22_hex_segment.py`](examples/iea22_hex_segment.py), rendered in the
+  [`examples/IEA/iea22_segment.py`](examples/IEA/iea22_segment.py), rendered in the
   [tutorial](https://bagla0.github.io/OpenSG_io/tutorials/iea22_tutorial.html)).
 - OpenFAST ElastoDyn/BeamDyn reading round-trips against the BAR blade data.
 

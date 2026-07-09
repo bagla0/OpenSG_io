@@ -1,68 +1,69 @@
-"""Sphinx config for the OpenSG_io documentation site (GitHub Pages, pydata-sphinx-theme)."""
+"""Sphinx configuration for the OpenSG_io documentation site.
+
+Same stack and look as the OpenSG-TW documentation (sphinx-rtd-theme + myst-nb,
+matching the upstream OpenSG docs at wenbinyugroup.github.io/OpenSG), deployed to
+GitHub Pages.  Tutorial notebooks are committed pre-executed and rendered as-is.
+"""
+import datetime
 import os
 import sys
-sys.path.insert(0, os.path.abspath(".."))
+
+sys.path.insert(0, os.path.abspath(".."))   # repo root, so autodoc can import opensg_io.*
 
 project = "OpenSG_io"
-author = "Akshat Bagla"
-copyright = "2026, Akshat Bagla (bagla0)"
+author = "Akshat Bagla (bagla0)"
+copyright = "%d, Akshat Bagla" % datetime.date.today().year
 release = "0.3.0"
 
+# ---------------------------------------------------------------- extensions
 extensions = [
-    "myst_nb",                       # MyST markdown + Jupyter notebooks (.ipynb)
-    "sphinx_design",                 # grids, cards, tabs, buttons on the landing page
-    "sphinx_copybutton",             # copy button on code blocks
+    "myst_nb",            # MyST markdown + executed Jupyter notebooks (.ipynb)
+    "sphinx_design",      # grids / cards on the tutorials index
+    "sphinx_copybutton",  # copy button on code blocks
+    "sphinx.ext.mathjax",
     "sphinx.ext.autodoc",
+    "sphinx.ext.autosummary",
     "sphinx.ext.napoleon",
     "sphinx.ext.viewcode",
     "sphinx.ext.intersphinx",
 ]
-myst_enable_extensions = ["colon_fence", "deflist", "fieldlist", "attrs_inline", "substitution"]
-nb_execution_mode = "off"            # notebooks are committed pre-executed -> render stored outputs
+autosummary_generate = True
+
+myst_enable_extensions = [
+    "colon_fence", "deflist", "dollarmath", "amsmath", "attrs_inline", "substitution",
+]
+myst_dmath_double_inline = True
+
+# Notebooks are committed already executed -> just render the stored outputs.
+nb_execution_mode = "off"
+nb_merge_streams = True
+
 source_suffix = {".md": "myst-nb", ".ipynb": "myst-nb", ".rst": "restructuredtext"}
 master_doc = "index"
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
+exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "jupyter_execute"]
 
-# ---- HTML / theme ----
-html_theme = "pydata_sphinx_theme"
+# ---------------------------------------------------------------- HTML / theme
+# Read-the-Docs theme, identical to the OpenSG-TW documentation (and the upstream
+# OpenSG docs), of which OpenSG_io is the input-preparation companion.
+html_theme = "sphinx_rtd_theme"
 html_title = "OpenSG_io"
 html_static_path = ["_static"]
 html_css_files = ["custom.css"]
-html_logo = "_static/logo.svg"
-html_favicon = "_static/logo.svg"
 html_show_sourcelink = False
-html_context = {
-    "github_user": "bagla0",
-    "github_repo": "OpenSG_io",
-    "github_version": "main",
-    "doc_path": "docs",
-    "default_mode": "auto",
-}
-html_theme_options = {
-    "logo": {"text": "OpenSG_io"},
-    "github_url": "https://github.com/bagla0/OpenSG_io",
-    "icon_links": [
-        {"name": "GitHub", "url": "https://github.com/bagla0/OpenSG_io", "icon": "fa-brands fa-github"},
-        {"name": "OpenSG-TW", "url": "https://github.com/bagla0/OpenSG-TW", "icon": "fa-solid fa-cube"},
-    ],
-    "navbar_align": "left",
-    "navbar_center": [],                 # no top horizontal nav -- navigation lives in the LEFT sidebar
-    "navbar_end": ["theme-switcher", "navbar-icon-links"],
-    "navbar_persistent": ["search-button"],
-    "header_links_before_dropdown": 6,
-    "show_prev_next": True,
-    "collapse_navigation": False,        # show the full nav tree expanded in the left sidebar
-    "show_toc_level": 2,
-    "use_edit_page_button": True,
-    "pygments_light_style": "friendly",
-    "pygments_dark_style": "github-dark",
-    "footer_start": ["copyright"],
-    "footer_end": ["theme-version"],
-    "announcement": "OpenSG_io &mdash; prepare OpenSG cross-section inputs from windIO, PreVABS, or OpenFAST.",
-    "secondary_sidebar_items": ["page-toc", "sourcelink"],
-}
-html_sidebars = {"**": ["sidebar-nav-bs"]}   # left vertical navigation sidebar on EVERY page
+html_last_updated_fmt = "%Y-%m-%d"
 
-intersphinx_mapping = {"python": ("https://docs.python.org/3", None)}
-autodoc_mock_imports = ["windIO", "jax", "dolfinx", "pypardiso", "matplotlib"]
+html_theme_options = {
+    "collapse_navigation": False,
+    "navigation_depth": 3,
+    "titles_only": False,
+    "prev_next_buttons_location": "bottom",
+    "style_external_links": True,
+}
+
+intersphinx_mapping = {"python": ("https://docs.python.org/3", None),
+                       "numpy": ("https://numpy.org/doc/stable", None)}
+# autodoc imports opensg_io; mock everything heavier than numpy/yaml
+autodoc_mock_imports = ["windIO", "jax", "dolfinx", "pypardiso", "matplotlib", "pyvista",
+                        "scipy", "gmsh"]
 autodoc_default_options = {"members": True, "undoc-members": False, "show-inheritance": True}
+suppress_warnings = ["docutils", "myst.substitution", "autodoc"]
