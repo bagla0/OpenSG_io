@@ -288,13 +288,18 @@ def _lam_round_key(lam):
     return tuple((m, round(float(t), 9), round(float(a), 4)) for (m, t, a) in lam)
 
 
-def shell_between_sections(res, cs1, cs2=None):
-    """EQUIVALENT mid-surface QUAD shell segment for a hex_between_sections result.
+def shell_between_sections(res, cs1, cs2=None, reference="OML"):
+    """EQUIVALENT QUAD shell segment for a hex_between_sections result.
 
     Same canonical hoop skeleton and span stations as the solid, so shell-vs-solid
-    comparisons are one-to-one.  Skin quads sit on the wall MID-surface; each web is a
-    strip of mid-columns whose top/bottom rows are the inner-skin mid nodes (a branched
-    T-junction shared by exactly 3 quads).
+    comparisons are one-to-one.  Each web is a strip whose top/bottom rows are the skin
+    nodes (a branched T-junction shared by exactly 3 quads).
+
+    reference : which wall surface the shell skin sits on -- "OML" (default) puts it on
+        the outer mold line, exactly where the solid's outer hex ring is, so the shell
+        contour coincides with the solid outer surface and the layup is referenced from
+        the OML inward (pair with an OML-referenced ABD, frac=0, the FEniCS shell
+        default).  "mid" puts it on the wall mid-surface (pair with frac=0.5).
 
     The layup is the SPAN-INTERPOLATED laminate at each span bay (like NuMAD's per-
     (region, bay) stacks): the taper's stiffness change lives entirely in the shell
@@ -302,7 +307,7 @@ def shell_between_sections(res, cs1, cs2=None):
     frames use the NuMAD convention (e1=span root->tip, e3=inward normal, e2=e3 x e1).
 
     Returns dict(nodes, quads, qsec (per-quad section index), qweb, oris, sections
-    (list of laminates), skin_tl, web_tl, region_of_quad, sec2d)."""
+    (list of laminates), tl_by_region, region_of_quad, sec2d, reference)."""
     from .orientation import element_frame
     from .section_offset import miter_normals, ensure_ccw
     cs2 = cs2 or cs1
@@ -323,7 +328,10 @@ def shell_between_sections(res, cs1, cs2=None):
     def station_shell(P):
         X = np.zeros((NPs, 2))
         for i in range(NC):
-            X[ids[("s", i)]] = 0.5 * (P[i * (nr + 1) + 0, :2] + P[i * (nr + 1) + nr, :2])
+            if reference == "OML":
+                X[ids[("s", i)]] = P[i * (nr + 1) + 0, :2]         # outer mold line (ring 0)
+            else:
+                X[ids[("s", i)]] = 0.5 * (P[i * (nr + 1) + 0, :2] + P[i * (nr + 1) + nr, :2])
         for wi, NY in enumerate(NYs):
             top, bot = wpair[wi]; jmid = len(top) // 2
             pt = X[ids[("s", top[jmid])]]; pb = X[ids[("s", bot[jmid])]]
@@ -401,7 +409,7 @@ def shell_between_sections(res, cs1, cs2=None):
                  skin_region=skin_region, skin_n=skin_n, wnode=wnode, NYs=NYs, ids=ids)
     return dict(nodes=snodes, quads=quads, qsec=np.array(qsec), qweb=qweb,
                 oris=np.array(oris), sections=sections, tl_by_region=tl_by_region,
-                region_of_quad=region_of_quad, sec2d=sec2d)
+                region_of_quad=region_of_quad, sec2d=sec2d, reference=reference)
 
 
 def assert_shell_conforming(shell, n_webs, nsp):
