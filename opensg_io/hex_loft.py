@@ -19,6 +19,7 @@ every export runs the mandatory conformity gate.  A matching mid-surface QUAD sh
 (same hoop skeleton, same span stations) is produced for equivalent shell-vs-solid studies.
 """
 import math
+import os
 import numpy as np
 
 from .conformity import assert_conforming
@@ -197,15 +198,23 @@ def build_section_mesh(cs_list, skel, nr=4, ny_target=None):
         nw_k = next(skel["counts"][k] for k in range(nint) if skel["kinds"][k][0] == "band"
                     and skel["kinds"][k][1] == wi)
         cuts_by_region[("web", wi)] = tl_by_region[("web", wi)].group_cuts(nw_k)
-    st = []
-    for i, cs in enumerate(cs_list):
-        tau = i / max(1, ns - 1)
-        fi = np.array([tl_by_region[("R", k)].group_fractions(cuts_by_region[("R", k)], tau)
+    # FIXED mid-segment (tau=0.5) ring fractions for ALL stations: the ply-group
+    # interfaces sit at the SAME fractional depth at both ends, so the loft is the same
+    # clean (0-inverted) structure as uniform layers -- just at ply-conforming depths.
+    # Per-STATION fractions would differ end-to-end and invert hexes on tapering walls
+    # (a 76->60 mm wall shifts the foam fraction enough to fold near-boundary hexes).
+    # Material stays ply-exact: group l is the same plies at any tau, so group_material
+    # in the payloads recovers each layer's exact ply regardless of this choice.
+    if os.environ.get("OPENSG_UNIFORM_LAYERS"):            # diagnostic: uniform layers
+        fi, hoop_frac = None, None
+    else:
+        fi = np.array([tl_by_region[("R", k)].group_fractions(cuts_by_region[("R", k)], 0.5)
                        for k in range(nint)])
         hoop_frac = {k: tl_by_region[("web", skel["kinds"][k][1])].group_fractions(
-                        cuts_by_region[("web", skel["kinds"][k][1])], tau)
+                        cuts_by_region[("web", skel["kinds"][k][1])], 0.5)
                      for k in range(nint) if skel["kinds"][k][0] == "band"}
-        st.append(build_station(cs, skel, i, nr, frac_int=fi, hoop_frac=hoop_frac))
+    st = [build_station(cs, skel, i, nr, frac_int=fi, hoop_frac=hoop_frac)
+          for i, cs in enumerate(cs_list)]
     NC = st[0]["NC"]
     bands = _band_cols(skel, 0)
     webs0 = cs_list[0]["webs"]
@@ -299,6 +308,38 @@ def build_section_mesh(cs_list, skel, nr=4, ny_target=None):
                 bands=bands, tl_by_region=tl_by_region, cuts_by_region=cuts_by_region)
 
 
+def _hex_min_sj(nodes, H):
+    """Per-hex minimum scaled corner Jacobian (VTK ordering)."""
+    from .conformity import HEX_CORNERS
+    X = np.asarray(nodes)[np.asarray(H)]
+    mins = np.full(len(X), np.inf)
+    for (c, a, b, t) in HEX_CORNERS:
+        e1 = X[:, a] - X[:, c]; e2 = X[:, b] - X[:, c]; e3 = X[:, t] - X[:, c]
+        det = np.einsum("ij,ij->i", np.cross(e1, e2), e3)
+        sc = (np.linalg.norm(e1, axis=1) * np.linalg.norm(e2, axis=1) * np.linalg.norm(e3, axis=1))
+        mins = np.minimum(mins, det / np.where(sc > 1e-300, sc, 1.0))
+    return mins
+
+
+def _repair_inverted(nodes, hexes):
+    """NuMAD-style positive-Jacobian repair (NuMesh3D.m:61-98): a hex whose corner
+    Jacobian is negative because the span loft flipped its handedness (thin twisting
+    web plates on a tapering section) is un-inverted by swapping its bottom/top faces
+    -- same 8 nodes, so conformity and material are untouched.  Only hexes the swap
+    actually fixes are swapped; genuinely degenerate hexes are left for the caller's
+    gate to catch.  Returns (hexes, n_swapped, n_still_bad)."""
+    hexes = np.array(hexes)
+    m0 = _hex_min_sj(nodes, hexes)
+    bad = np.where(m0 <= 0.0)[0]
+    if len(bad) == 0:
+        return hexes, 0, 0
+    swap = hexes[bad][:, [4, 5, 6, 7, 0, 1, 2, 3]]
+    ms = _hex_min_sj(nodes, swap)
+    take = ms > 0.0
+    hexes[bad[take]] = swap[take]
+    return hexes, int(take.sum()), int((~take).sum())
+
+
 # --------------------------------------------------------------------------- hex loft
 def hex_between_sections(cs1, cs2, z1, z2, nr=4, nsp=12, nw=2, mesh_size=0.02):
     """GENERAL two-station hex loft.  Returns dict(nodes, hexes, htag, sec, skel)."""
@@ -315,9 +356,12 @@ def hex_between_sections(cs1, cs2, z1, z2, nr=4, nsp=12, nw=2, mesh_size=0.02):
     hexes = np.empty((nsp * len(q), 8), int)
     for s in range(nsp):
         hexes[s * len(q):(s + 1) * len(q)] = np.hstack([s * NP + q, (s + 1) * NP + q])
+    # per-hex positive-Jacobian repair (thin web plates flip handedness on a tapering
+    # section; the station-0 face winding cannot protect every span slice)
+    hexes, nswap, nbad = _repair_inverted(nodes, hexes)
     htag = sec["ftag"] * nsp
     return dict(nodes=nodes, hexes=hexes, htag=htag, sec=sec, skel=skel,
-                z1=z1, z2=z2, nsp=nsp)
+                z1=z1, z2=z2, nsp=nsp, n_swapped=nswap, n_still_inverted=nbad)
 
 
 # ------------------------------------------------------------------- equivalent shell
@@ -652,6 +696,8 @@ def solid_yaml_payload(res, cs1, cs2=None):
         # so no depth sampling -- a 3 mm skin can never vanish under a 19 mm layer
         m, ang = tl_by_region[key].group_material(cuts_by_region[key], tag[2], tau)
         span = nodes[hx[4]] - nodes[hx[0]]
+        if span[2] < 0.0:                                  # swapped-hex repair flips hx[0]/hx[4]
+            span = -span                                   # e1 must stay root->tip (+z)
         n_surf = np.array([fn2d[f][0], fn2d[f][1], 0.0])
         oris[k] = element_frame(span, n_surf, ang)
         mats.append(m)

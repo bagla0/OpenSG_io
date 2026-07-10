@@ -63,6 +63,7 @@ tutorials/openfast
 :hidden:
 :caption: Reference
 
+mesh_generation
 api
 pipeline
 ```
