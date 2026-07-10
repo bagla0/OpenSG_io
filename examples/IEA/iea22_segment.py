@@ -23,19 +23,26 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, REPO)
 
+import yaml as _yaml
 from opensg_io.converter import load_blade, build_cross_section, _mat_block
 from opensg_io.hex_loft import (hex_between_sections, shell_between_sections,
                                 solid_yaml_payload, shell_yaml_payload,
-                                assert_shell_conforming)
+                                assert_shell_conforming, region_taper_laminates,
+                                solid_boundary_payload, shell_boundary_payload)
 from opensg_io.conformity import assert_conforming, min_scaled_jacobian
 from opensg_io.render3d import render_mesh_png, render_section_png, render_section_ends
+
+
+def _dump(payload, path):
+    _yaml.safe_dump(payload, open(path, "w"), default_flow_style=None, sort_keys=False)
 
 # ----- inputs (windIO from the repo's examples/data, NOT an absolute path) -----------
 WINDIO = sys.argv[1] if len(sys.argv) > 1 else os.path.join(REPO, "examples", "data",
                                                             "IEA-22-280-RWT.yaml")
 R1 = float(sys.argv[2]) if len(sys.argv) > 2 else 0.20
 R2 = float(sys.argv[3]) if len(sys.argv) > 3 else 0.30
-NR, NSP, NW, MESH = 4, 12, 2, 0.02
+NR = int(os.environ.get("IEA_NR", "4"))                  # through-thickness layers (solid)
+NSP, NW, MESH = 12, 2, 0.02
 OUT = os.path.join(HERE, "output")
 os.makedirs(OUT, exist_ok=True)
 
@@ -67,7 +74,8 @@ def main():
     assert ninv == 0, "%d inverted hexes" % ninv
     print("conformity gate (solid): PASS   min scaled Jacobian = %.3f (0 inverted)" % msj, flush=True)
 
-    oris, hmats = solid_yaml_payload(res, cs1)
+    # rigorous span-interpolated layup (ply drops handled) -> per-hex material + frame
+    oris, hmats = solid_yaml_payload(res, cs1, cs2)
     mat_names = sorted(set(hmats))
     solid = dict(nodes=nodes, hexes=hexes, oris=oris, hmats=hmats, mat_names=mat_names)
     sets = {"element": [{"name": m, "labels": [k + 1 for k, hm in enumerate(hmats) if hm == m]}
@@ -77,17 +85,33 @@ def main():
     from opensg_io.mesh3d import export_solid_yaml
     export_solid_yaml(os.path.join(OUT, "iea22_seg_solid.yaml"), nodes, hexes, "hex",
                       oris, mats, sets=sets)
-    print("wrote output/iea22_seg_solid.yaml", flush=True)
+    print("wrote output/iea22_seg_solid.yaml   (FULL solid taper)", flush=True)
 
     # ---- equivalent mid-surface shell -------------------------------------------
-    shell = shell_between_sections(res, cs1)
+    shell = shell_between_sections(res, cs1, cs2)
     njunc = assert_shell_conforming(shell, len(cs1["webs"]), NSP)
-    print("conformity (shell, branched): PASS  (%d nodes, %d quads; %d T-junction edges)"
-          % (len(shell["nodes"]), len(shell["quads"]), njunc), flush=True)
-    yaml.safe_dump(shell_yaml_payload(shell, blade, _mat_block),
-                   open(os.path.join(OUT, "iea22_seg_shell.yaml"), "w"),
-                   default_flow_style=None, sort_keys=False)
-    print("wrote output/iea22_seg_shell.yaml", flush=True)
+    print("conformity (shell, branched): PASS  (%d nodes, %d quads; %d T-junction edges; %d layups)"
+          % (len(shell["nodes"]), len(shell["quads"]), njunc, len(shell["sections"])), flush=True)
+    _dump(shell_yaml_payload(shell, blade, _mat_block), os.path.join(OUT, "iea22_seg_shell.yaml"))
+    print("wrote output/iea22_seg_shell.yaml   (FULL shell taper)", flush=True)
+
+    # ---- BOUNDARY meshes at both ends (always emitted with the taper) ------------
+    for si, tag in ((0, "L"), (1, "R")):
+        _dump(solid_boundary_payload(res, cs1, cs2, si, blade, _mat_block),
+              os.path.join(OUT, "iea22_boundary_%s_solid.yaml" % tag))
+        _dump(shell_boundary_payload(res, shell, cs1, cs2, si, blade, _mat_block),
+              os.path.join(OUT, "iea22_boundary_%s_shell.yaml" % tag))
+    print("wrote output/iea22_boundary_{L,R}_{solid,shell}.yaml   (4 boundary sections)", flush=True)
+
+    # ---- ply-drop manifest (rigorous span-interpolated layup) --------------------
+    tl_by_region = region_taper_laminates(cs1, cs2, res["skel"])
+    drops = [(("web_%d" % key[1] if key[0] == "web" else "skin_R%d" % key[1]), g)
+             for key, tl in tl_by_region.items() for g in tl.dropped()]
+    print("layup: %d regions, %d ply-drops across the segment (linear thickness interp)"
+          % (len(tl_by_region), len(drops)), flush=True)
+    for name, g in drops[:8]:
+        print("  drop @ %-9s %-20s ang=%+.0f  t: %.2f -> %.2f mm"
+              % (name, g.material, g.angle, 1e3 * g.t_left, 1e3 * g.t_right), flush=True)
 
     # ---- renders -----------------------------------------------------------------
     render_section_png(sec, os.path.join(OUT, "iea22_loft_input.png"),
@@ -100,9 +124,11 @@ def main():
                     os.path.join(OUT, "iea22_solid_3d.png"),
                     "IEA-22 segment r=%.2f->%.2f: structured HEX (%d hexes, by material)"
                     % (R1, R2, len(hexes)))
-    render_mesh_png(shell["nodes"], shell["quads"], "quad", np.array(shell["qlam"], int),
+    reg = {r: i for i, r in enumerate(sorted(set(shell["region_of_quad"])))}
+    render_mesh_png(shell["nodes"], shell["quads"], "quad",
+                    np.array([reg[r] for r in shell["region_of_quad"]], int),
                     os.path.join(OUT, "iea22_shell_3d.png"),
-                    "IEA-22 segment r=%.2f->%.2f: mid-surface SHELL (%d quads, by layup)"
+                    "IEA-22 segment r=%.2f->%.2f: mid-surface SHELL (%d quads, by region)"
                     % (R1, R2, len(shell["quads"])))
     for n in ("iea22_loft_input", "iea22_sections", "iea22_solid_3d", "iea22_shell_3d"):
         print("wrote output/%s.png" % n, flush=True)

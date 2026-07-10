@@ -221,8 +221,12 @@ def build_section_mesh(cs_list, skel, nr=4, ny_target=None):
                     P[wid(wi, j, m), :2] = (1 - tau) * pt + tau * pb
         stations.append(P)
 
-    # ---- shared quad topology
-    faces2d, ftag = [], []
+    # ---- shared quad topology (+ per-face INWARD surface normal at station 0, for the
+    # NuMAD-convention element frame; computed geometrically so it is independent of the
+    # CCW re-winding below)
+    from .orientation import skin_inward_normal_2d, web_plate_normal_2d
+    r0 = st[0]["rings"]; P0 = stations[0]
+    faces2d, ftag, fn2d, fregion = [], [], [], []
     hoop_kind = st[0]["hoop_kind"]
     for i in range(NC):
         ii = (i + 1) % NC
@@ -231,12 +235,16 @@ def build_section_mesh(cs_list, skel, nr=4, ny_target=None):
         for l in range(nr):
             faces2d.append([sid(i, l), sid(ii, l), sid(ii, l + 1), sid(i, l + 1)])
             ftag.append(("skin", sid_lam, l))
+            fregion.append(("R", int(hoop_kind[i])))       # label-matched skeleton region
+            fn2d.append(skin_inward_normal_2d(r0, l, i, ii))
     for wi in range(len(webs0)):
         top, _b = wpair[wi]; NY = NYs[wi]
         for j in range(len(top) - 1):
             for m in range(NY):
                 faces2d.append([wn(wi, j, m), wn(wi, j + 1, m), wn(wi, j + 1, m + 1), wn(wi, j, m + 1)])
                 ftag.append(("web", wi, j))
+                fregion.append(("web", wi))
+                fn2d.append(web_plate_normal_2d(P0[wn(wi, j, m)][:2], P0[wn(wi, j, m + 1)][:2]))
     # canonical CCW winding of every 2-D face (signed area > 0), so the +z extrusion
     # always yields right-handed (positive-Jacobian) hexes AND the per-face hoop/depth
     # tangent e2 has one consistent sense for skin and webs (NuMAD repairs the same
@@ -249,8 +257,9 @@ def build_section_mesh(cs_list, skel, nr=4, ny_target=None):
         b = (a + 1) % 4
         area2 += Q[:, a, 0] * Q[:, b, 1] - Q[:, b, 0] * Q[:, a, 1]
     faces2d[area2 < 0] = faces2d[area2 < 0][:, ::-1]
-    return dict(faces2d=faces2d, ftag=ftag, stations=stations, NP=NP, NC=NC,
-                nr=nr, NYs=NYs, wpair=wpair, st=st, bands=bands)
+    return dict(faces2d=faces2d, ftag=ftag, fregion=fregion, fn2d=np.array(fn2d),
+                stations=stations, NP=NP, NC=NC, nr=nr, NYs=NYs, wpair=wpair, st=st,
+                bands=bands)
 
 
 # --------------------------------------------------------------------------- hex loft
@@ -275,21 +284,33 @@ def hex_between_sections(cs1, cs2, z1, z2, nr=4, nsp=12, nw=2, mesh_size=0.02):
 
 
 # ------------------------------------------------------------------- equivalent shell
-def shell_between_sections(res, cs1):
+def _lam_round_key(lam):
+    return tuple((m, round(float(t), 9), round(float(a), 4)) for (m, t, a) in lam)
+
+
+def shell_between_sections(res, cs1, cs2=None):
     """EQUIVALENT mid-surface QUAD shell segment for a hex_between_sections result.
 
     Same canonical hoop skeleton and span stations as the solid, so shell-vs-solid
-    comparisons are one-to-one.  Skin quads sit on the wall MID-surface (mean of OML
-    and inner ring); each web is a strip of mid-columns whose top/bottom rows are the
-    inner-skin mid nodes (a branched T-junction shared by exactly 3 quads).
+    comparisons are one-to-one.  Skin quads sit on the wall MID-surface; each web is a
+    strip of mid-columns whose top/bottom rows are the inner-skin mid nodes (a branched
+    T-junction shared by exactly 3 quads).
 
-    Returns dict(nodes (Ns,3), quads (Nq,4), qlam, qweb, oris (Nq,9), lam_by_id,
-    used_sets, sec2d) where sec2d holds the per-station 2-D section for cross-section
-    plots: dict(S=[S1,S2] (NPs,2), skin_loop (NC,), web_lines list, NPs)."""
+    The layup is the SPAN-INTERPOLATED laminate at each span bay (like NuMAD's per-
+    (region, bay) stacks): the taper's stiffness change lives entirely in the shell
+    layup thickness, so each span slice carries its own interpolated section.  Element
+    frames use the NuMAD convention (e1=span root->tip, e3=inward normal, e2=e3 x e1).
+
+    Returns dict(nodes, quads, qsec (per-quad section index), qweb, oris, sections
+    (list of laminates), skin_tl, web_tl, region_of_quad, sec2d)."""
+    from .orientation import element_frame
+    from .section_offset import miter_normals, ensure_ccw
+    cs2 = cs2 or cs1
     sec, skel = res["sec"], res["skel"]
     z1, z2, nsp = res["z1"], res["z2"], res["nsp"]
     P1, P2 = sec["stations"]
     NC, nr, NYs, wpair = sec["NC"], sec["nr"], sec["NYs"], sec["wpair"]
+    tl_by_region = region_taper_laminates(cs1, cs2, skel)
 
     ids = {}
     for i in range(NC):
@@ -326,39 +347,61 @@ def shell_between_sections(res, cs1):
         snodes[s * NPs:(s + 1) * NPs, :2] = (1 - tau) * S1 + tau * S2
         snodes[s * NPs:(s + 1) * NPs, 2] = (1 - tau) * z1 + tau * z2
 
-    hoop_kind = sec["st"][0]["hoop_kind"]; hoop_s = sec["st"][0]["hoop_s"]
-    quads, qlam, qweb = [], [], []
+    # inward mid-surface skin normals (fold-free miter, oriented by signed area)
+    loop = np.array([S1[ids[("s", i)]] for i in range(NC)])
+    loopc, flipped = ensure_ccw(loop)
+    m_in, _s = miter_normals(loopc)
+    skin_n = m_in[::-1] if flipped else m_in                # (NC,2) inward normal per skin node
+
+    # per-hoop skin region key (label-matched skeleton region -> its TaperLaminate)
+    hoop_kind = sec["st"][0]["hoop_kind"]
+    skin_region = [("R", int(hoop_kind[i])) for i in range(NC)]
+
+    sections, sec_index = [], {}                            # dedup identical laminates
+
+    def sec_id_for(lam):
+        key = _lam_round_key(lam)
+        if key not in sec_index:
+            sec_index[key] = len(sections)
+            sections.append([(m, float(t), float(a)) for (m, t, a) in lam])
+        return sec_index[key]
+
+    quads, qsec, qweb, region_of_quad, oris = [], [], [], [], []
     for s in range(nsp):
+        tau = (s + 0.5) / nsp
         for i in range(NC):
             ii = (i + 1) % NC
-            kind = skel["kinds"][hoop_kind[i]]
-            sid_lam = kind[1] if kind[0] == "skin" else None
-            if sid_lam is None:                            # band strip carries local skin layup
-                sid_lam = [sg["set_id"] for sg in cs1["segments"]
-                           if sg["s_a"] - 1e-9 <= hoop_s[i] <= sg["s_b"] + 1e-9][0]
-            quads.append([s * NPs + ids[("s", i)], s * NPs + ids[("s", ii)],
-                          (s + 1) * NPs + ids[("s", ii)], (s + 1) * NPs + ids[("s", i)]])
-            qlam.append(sid_lam); qweb.append(False)
+            q = [s * NPs + ids[("s", i)], s * NPs + ids[("s", ii)],
+                 (s + 1) * NPs + ids[("s", ii)], (s + 1) * NPs + ids[("s", i)]]
+            quads.append(q)
+            lam = tl_by_region[skin_region[i]].at(tau)
+            qsec.append(sec_id_for(lam)); qweb.append(False)
+            region_of_quad.append(skin_region[i])
+            n2d = 0.5 * (skin_n[i] + skin_n[ii])
+            oris.append(element_frame(snodes[q[3]] - snodes[q[0]],
+                                      np.array([n2d[0], n2d[1], 0.0]), 0.0))
         for wi, NY in enumerate(NYs):
+            lam = tl_by_region[("web", wi)].at(tau)
+            sid = sec_id_for(lam)
             for m in range(NY):
-                quads.append([s * NPs + wnode(wi, m), s * NPs + wnode(wi, m + 1),
-                              (s + 1) * NPs + wnode(wi, m + 1), (s + 1) * NPs + wnode(wi, m)])
-                qlam.append(cs1["webs"][wi]["lam"]); qweb.append(True)
+                q = [s * NPs + wnode(wi, m), s * NPs + wnode(wi, m + 1),
+                     (s + 1) * NPs + wnode(wi, m + 1), (s + 1) * NPs + wnode(wi, m)]
+                quads.append(q)
+                qsec.append(sid); qweb.append(True)
+                region_of_quad.append(("web", wi))
+                d = snodes[s * NPs + wnode(wi, m + 1)][:2] - snodes[s * NPs + wnode(wi, m)][:2]
+                n2d = np.array([-d[1], d[0]])
+                oris.append(element_frame(snodes[q[3]] - snodes[q[0]],
+                                          np.array([n2d[0], n2d[1], 0.0]), 0.0))
     quads = np.array(quads, int)
 
-    oris = np.zeros((len(quads), 9))
-    for k, q in enumerate(quads):
-        gen = snodes[q[3]] - snodes[q[0]]; a1 = gen / np.linalg.norm(gen)
-        e2r = snodes[q[1]] - snodes[q[0]]; e2 = e2r - (e2r @ a1) * a1; e2 /= np.linalg.norm(e2)
-        e3 = np.cross(a1, e2); e3 /= np.linalg.norm(e3)
-        oris[k] = np.concatenate([a1, e2, e3])
-
-    lam_by_id = {sid: lam for lam, sid in cs1["laminates"].items()}
     skin_loop = [ids[("s", i)] for i in range(NC)]
     web_lines = [[wnode(wi, m) for m in range(NYs[wi] + 1)] for wi in range(len(NYs))]
-    sec2d = dict(S=[S1, S2], skin_loop=skin_loop, web_lines=web_lines, NPs=NPs)
-    return dict(nodes=snodes, quads=quads, qlam=qlam, qweb=qweb, oris=oris,
-                lam_by_id=lam_by_id, used_sets=sorted(set(qlam)), sec2d=sec2d)
+    sec2d = dict(S=[S1, S2], skin_loop=skin_loop, web_lines=web_lines, NPs=NPs,
+                 skin_region=skin_region, skin_n=skin_n, wnode=wnode, NYs=NYs, ids=ids)
+    return dict(nodes=snodes, quads=quads, qsec=np.array(qsec), qweb=qweb,
+                oris=np.array(oris), sections=sections, tl_by_region=tl_by_region,
+                region_of_quad=region_of_quad, sec2d=sec2d)
 
 
 def assert_shell_conforming(shell, n_webs, nsp):
@@ -384,21 +427,124 @@ def assert_shell_conforming(shell, n_webs, nsp):
 
 
 def shell_yaml_payload(shell, blade, mat_block):
-    """Assemble the OpenSG 1-D shell YAML dict from a shell_between_sections result."""
+    """OpenSG 3-D shell SEGMENT YAML dict (FEniCS ShellSegmentMesh format: numeric
+    [x,y,z] nodes, numeric 0-BASED quad connectivity and set labels, `elastic`-nested
+    materials).  Span-interpolated per-bay layups, one element set per unique section."""
     snodes, quads = shell["nodes"], shell["quads"]
-    qlam, oris = shell["qlam"], shell["oris"]
-    lam_by_id, used = shell["lam_by_id"], shell["used_sets"]
-    return {"nodes": [["%.9f %.9f %.9f" % tuple(p)] for p in snodes],
-            "elements": [[" ".join(str(v + 1) for v in q)] for q in quads],
+    qsec, oris, sections = shell["qsec"], shell["oris"], shell["sections"]
+    used = sorted(set(int(s) for s in qsec))
+    mats = sorted({m for lam in sections for (m, _t, _a) in lam})
+    return {"nodes": [[float(p[0]), float(p[1]), float(p[2])] for p in snodes],
+            "elements": [[int(v) for v in q] for q in quads],           # 0-based
             "sets": {"element": [{"name": "layup_%d" % l,
-                                  "labels": [k + 1 for k, ql in enumerate(qlam) if ql == l]}
+                                  "labels": [k for k in range(len(qsec)) if qsec[k] == l]}
                                  for l in used]},
-            "sections": [{"elementSet": "layup_%d" % l, "type": "shell",
-                          "layup": [[m, float(t), float(a)] for (m, t, a) in lam_by_id[l]]}
+            "sections": [{"type": "shell", "elementSet": "layup_%d" % l,
+                          "layup": [[m, float(t), float(a)] for (m, t, a) in sections[l]]}
                          for l in used],
             "elementOrientations": [[float(v) for v in o] for o in oris],
-            "materials": [mat_block(blade, m)
-                          for m in sorted({mm for l in used for (mm, _t, _a) in lam_by_id[l]})]}
+            "materials": [mat_block(blade, m) for m in mats]}
+
+
+# ------------------------------------------------------------------- boundary meshes
+def _end_layer(nlayer_nodes, si, nsp):
+    """Node-index offset of the end cross-section: si=0 -> left (root, s=0),
+    si=1 -> right (tip, s=nsp)."""
+    return (0 if si == 0 else nsp) * nlayer_nodes
+
+
+def solid_boundary_payload(res, cs1, cs2, si, blade, mat_block):
+    """2-D solid cross-section (quad mesh) at end si -- FEniCS SolidBounMesh format
+    (string "x y z" nodes, string 1-BASED quad connectivity, flat E/G/nu/rho materials).
+    Beam axis is +z (out of plane); each quad carries the ply material at its
+    (region, layer) of the span-interpolated laminate and a fiber frame about +z."""
+    from .orientation import element_frame
+    sec = res["sec"]; NP = sec["NP"]; nr = sec["nr"]; fn2d = sec["fn2d"]
+    faces2d, ftag, fregion = sec["faces2d"], sec["ftag"], sec["fregion"]
+    z_end = res["z1"] if si == 0 else res["z2"]
+    tau = 0.0 if si == 0 else 1.0
+    off = _end_layer(NP, si, res["nsp"])
+    P = res["nodes"][off:off + NP]                          # (NP,3) end-station coords
+    tl_by_region = region_taper_laminates(cs1, cs2, res["skel"])
+    zhat = np.array([0.0, 0.0, 1.0])
+    fmats, oris = [], []
+    for k, (tag, f) in enumerate(zip(ftag, faces2d)):
+        tl = tl_by_region[fregion[k]]
+        if tag[0] == "skin":
+            frac = (tag[2] + 0.5) / nr
+        else:
+            ncols = len(sec["wpair"][tag[1]][0]) - 1
+            frac = (tag[2] + 0.5) / max(1, ncols)
+        m, ang = tl.ply_of_depth(tau, frac)
+        fmats.append(m)
+        n_surf = np.array([fn2d[k][0], fn2d[k][1], 0.0])
+        oris.append(element_frame(zhat, n_surf, ang))
+    names = sorted(set(fmats))
+    materials = []
+    for m in names:
+        b = mat_block(blade, m)
+        materials.append({"name": m, "E": b["elastic"]["E"], "G": b["elastic"]["G"],
+                          "nu": b["elastic"]["nu"], "rho": b["density"]})
+    return {"nodes": [["%.9f %.9f %.9f" % (p[0], p[1], z_end)] for p in P],
+            "elements": [[" ".join(str(int(v) + 1) for v in f)] for f in faces2d],
+            "sets": {"element": [{"name": m,
+                                  "labels": [k + 1 for k in range(len(fmats)) if fmats[k] == m]}
+                                 for m in names]},
+            "elementOrientations": [[float(v) for v in o] for o in oris],
+            "materials": materials}
+
+
+def shell_boundary_payload(res, shell, cs1, cs2, si, blade, mat_block):
+    """1-D shell cross-section (line mesh) at end si -- FEniCS ShellBounMesh format
+    (string "x y z" nodes, string 1-BASED 2-node line connectivity, `elastic`-nested
+    materials, per-region interpolated layup).  Beam axis +z; geometric frame."""
+    from .orientation import element_frame
+    s2 = shell["sec2d"]; NPs = s2["NPs"]; skin_loop = s2["skin_loop"]
+    skin_region, skin_n = s2["skin_region"], s2["skin_n"]
+    tl_by_region = shell["tl_by_region"]
+    z_end = res["z1"] if si == 0 else res["z2"]
+    tau = 0.0 if si == 0 else 1.0
+    off = _end_layer(NPs, si, res["nsp"])
+    P = shell["nodes"][off:off + NPs]                       # (NPs,3) end section coords
+    zhat = np.array([0.0, 0.0, 1.0])
+
+    sections, sec_index = [], {}
+
+    def sec_id_for(lam):
+        key = _lam_round_key(lam)
+        if key not in sec_index:
+            sec_index[key] = len(sections)
+            sections.append([(m, float(t), float(a)) for (m, t, a) in lam])
+        return sec_index[key]
+
+    lines, lsec, oris = [], [], []
+    NC = len(skin_loop)
+    for i in range(NC):
+        a, b = skin_loop[i], skin_loop[(i + 1) % NC]
+        lines.append([a, b])
+        lsec.append(sec_id_for(tl_by_region[skin_region[i]].at(tau)))
+        n2d = 0.5 * (skin_n[i] + skin_n[(i + 1) % NC])
+        oris.append(element_frame(zhat, np.array([n2d[0], n2d[1], 0.0]), 0.0))
+    wnode = s2["wnode"]; NYs = s2["NYs"]
+    for wi, NY in enumerate(NYs):
+        lam_id = sec_id_for(tl_by_region[("web", wi)].at(tau))
+        for m in range(NY):
+            a, b = wnode(wi, m), wnode(wi, m + 1)
+            lines.append([a, b]); lsec.append(lam_id)
+            d = P[b][:2] - P[a][:2]
+            oris.append(element_frame(zhat, np.array([-d[1], d[0], 0.0]), 0.0))
+    used = sorted(set(lsec))
+    mats = sorted({m for lam in sections for (m, _t, _a) in lam})
+    return {"nodes": [["%.9f %.9f %.9f" % (p[0], p[1], z_end)] for p in P],
+            "elements": [[" ".join(str(v + 1) for v in ln)] for ln in lines],
+            "sets": {"element": [{"name": "layup_%d" % l,
+                                  "labels": [k + 1 for k in range(len(lsec)) if lsec[k] == l]}
+                                 for l in used]},
+            "sections": [{"type": "shell", "elementSet": "layup_%d" % l,
+                          "layup": [[m, float(t), float(a)] for (m, t, a) in sections[l]]}
+                         for l in used],
+            "elementOrientations": [[float(v) for v in o] for o in oris],
+            "materials": [mat_block(blade, m) for m in mats]}
 
 
 def _ply_at(lam, frac):
@@ -411,29 +557,65 @@ def _ply_at(lam, frac):
     return lam[-1][0], lam[-1][2]
 
 
-def solid_yaml_payload(res, cs1):
-    """Per-hex fiber orientation + material sets for export_solid_yaml."""
+def region_taper_laminates(cs1, cs2, skel):
+    """Per-region TaperLaminate spanning the two stations, keyed by region identity
+    (rigorous span-interpolated layup with ply drops).
+
+    Regions are matched by LABEL, not arc position: the canonical skeleton's breakpoints
+    are label-consistent across stations, so skeleton region k occupies breaks[0][k..k+1]
+    at the root and breaks[1][k..k+1] at the tip -- the SAME physical band even though a
+    smaller tip chord shifts its normalized arc.  (Matching by raw arc position instead
+    mislabels the spar cap as a panel and fabricates spurious ply drops.)
+
+    Returns a dict {("R", region_k): TaperLaminate, ("web", wi): TaperLaminate}."""
+    from .layup import TaperLaminate
+    out = {}
+    breaks, kinds = skel["breaks"], skel["kinds"]
+    for k in range(len(kinds)):
+        if kinds[k][0] == "web":
+            continue
+        lams = []
+        for si, cs in ((0, cs1), (1, cs2)):
+            amid = 0.5 * (breaks[si][k] + breaks[si][k + 1])
+            lams.append(list(_lam_tuple(cs, _set_at(cs, amid))))
+        out[("R", k)] = TaperLaminate.from_stations(lams[0], lams[1])
+    for wi, w in enumerate(cs1["webs"]):
+        lam1 = list(_lam_tuple(cs1, w["lam"]))
+        w2 = cs2["webs"][wi] if wi < len(cs2["webs"]) else w
+        lam2 = list(_lam_tuple(cs2, w2["lam"]))
+        out[("web", wi)] = TaperLaminate.from_stations(lam1, lam2)
+    return out
+
+
+def solid_yaml_payload(res, cs1, cs2=None):
+    """Per-hex material + NuMAD-convention fiber orientation for export_solid_yaml.
+
+    Each hex is assigned the ply of the SPAN-INTERPOLATED laminate at its through-
+    thickness depth (ply drops handled), and a right-handed (e1=span root->tip,
+    e3=inward normal, e2=e3 x e1) frame with the ply fiber angle rotated about e3
+    (opensg_io.orientation.element_frame)."""
+    from .orientation import element_frame
+    cs2 = cs2 or cs1
     nodes, hexes, htag = res["nodes"], res["hexes"], res["htag"]
-    sec = res["sec"]; nr = sec["nr"]
-    lam_by_id = {sid: lam for lam, sid in cs1["laminates"].items()}
-    cen = nodes[hexes].mean(1)
+    sec = res["sec"]; nr = sec["nr"]; fn2d = sec["fn2d"]; fregion = sec["fregion"]
+    z1, z2 = res["z1"], res["z2"]
+    nf = len(sec["faces2d"])
+    tl_by_region = region_taper_laminates(cs1, cs2, res["skel"])
     oris = np.zeros((len(hexes), 9))
     mats = []
     for k, (tag, hx) in enumerate(zip(htag, hexes)):
-        gen = nodes[hx[4]] - nodes[hx[0]]
-        a1 = gen / np.linalg.norm(gen)                          # taper generator (span)
-        e2r = nodes[hx[1]] - nodes[hx[0]]
-        e2 = e2r - (e2r @ a1) * a1; e2 /= np.linalg.norm(e2)    # hoop / depth tangent
-        e3 = np.cross(a1, e2); e3 /= np.linalg.norm(e3)
+        f = k % nf
+        zc = float(nodes[hx].mean(0)[2])
+        tau = 0.0 if abs(z2 - z1) < 1e-12 else np.clip((zc - z1) / (z2 - z1), 0.0, 1.0)
+        tl = tl_by_region[fregion[f]]
         if tag[0] == "skin":
-            lam = lam_by_id[tag[1]]
-            m, ang = _ply_at(lam, (tag[2] + 0.5) / nr)
+            frac = (tag[2] + 0.5) / nr
         else:
-            wlam = lam_by_id[cs1["webs"][tag[1]]["lam"]]
             ncols = len(sec["wpair"][tag[1]][0]) - 1
-            m, ang = _ply_at(wlam, (tag[2] + 0.5) / max(1, ncols))
-        ca, sa = math.cos(math.radians(ang)), math.sin(math.radians(ang))
-        e1 = ca * a1 + sa * e2; e1 /= np.linalg.norm(e1)
-        oris[k] = np.concatenate([e1, np.cross(e3, e1), e3])
+            frac = (tag[2] + 0.5) / max(1, ncols)
+        m, ang = tl.ply_of_depth(tau, frac)
+        span = nodes[hx[4]] - nodes[hx[0]]
+        n_surf = np.array([fn2d[f][0], fn2d[f][1], 0.0])
+        oris[k] = element_frame(span, n_surf, ang)
         mats.append(m)
     return oris, mats

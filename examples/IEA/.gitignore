@@ -1,0 +1,4 @@
+# server-specific launchers + one-off diagnostics (not part of the reproducible example)
+_run_solid.sh
+_find_dolfinx.sh
+_run_solid_e3flip.py

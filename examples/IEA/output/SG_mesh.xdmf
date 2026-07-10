@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<!DOCTYPE Xdmf SYSTEM "Xdmf.dtd" []>
+<Xdmf Version="3.0" xmlns:xi="https://www.w3.org/2001/XInclude">
+  <Domain>
+    <Grid Name="Grid" GridType="Uniform">
+      <Topology TopologyType="Hexahedron" NumberOfElements="13344" NodesPerElement="8">
+        <DataItem Dimensions="13344 8" NumberType="Int" Format="HDF">SG_mesh.h5:/Mesh/Grid/topology</DataItem>
+      </Topology>
+      <Geometry GeometryType="XYZ">
+        <DataItem Dimensions="16653 3" Format="HDF">SG_mesh.h5:/Mesh/Grid/geometry</DataItem>
+      </Geometry>
+    </Grid>
+    <Grid Name="Grid_Cells" GridType="Uniform">
+      <xi:include xpointer="xpointer(/Xdmf/Domain/Grid/Geometry)" />
+      <Topology TopologyType="Hexahedron" NumberOfElements="13344" NodesPerElement="8">
+        <DataItem Dimensions="13344 8" NumberType="Int" Format="HDF">SG_mesh.h5:/MeshTags/Grid_Cells/topology</DataItem>
+      </Topology>
+      <Attribute Name="Grid_Cells" AttributeType="Scalar" Center="Cell">
+        <DataItem Dimensions="13344 1" Format="HDF">SG_mesh.h5:/MeshTags/Grid_Cells/Values</DataItem>
+      </Attribute>
+    </Grid>
+  </Domain>
+</Xdmf>
