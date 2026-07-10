@@ -49,26 +49,78 @@ def _dump(payload, path):
     yaml.safe_dump(payload, open(path, "w"), default_flow_style=None, sort_keys=False)
 
 
+def yaml_to_msh(yaml_path, msh_path=None):
+    """Write a gmsh 2.2 .msh next to any OpenSG SG YAML (hex/quad/tri/line; numeric-0-based
+    or string-1-based node/element formats both handled).  Physical/geometric tag = the
+    element's set index, so the material/layup regions survive into the .msh."""
+    msh_path = msh_path or yaml_path.replace(".yaml", ".msh")
+    CL = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+    d = yaml.load(open(yaml_path), Loader=CL)
+    rows = d["nodes"]
+    if isinstance(rows[0][0], str):                        # "x y z" / 1-based
+        nodes = [[float(v) for v in r[0].split()] for r in rows]
+        cells = [[int(v) - 1 for v in r[0].split()] for r in d["elements"]]
+    else:                                                  # [x,y,z] / 0-based
+        nodes = [list(map(float, r)) for r in rows]
+        cells = [list(map(int, e)) for e in d["elements"]]
+    etype = {8: 5, 4: 3, 3: 2, 2: 1}[len(cells[0])]        # hex/quad/tri/line -> gmsh type
+    tag = [1] * len(cells)
+    for si, s in enumerate(d.get("sets", {}).get("element", [])):
+        for lab in s["labels"]:
+            tag[lab - 1 if isinstance(rows[0][0], str) else lab] = si + 1
+    with open(msh_path, "w") as f:
+        f.write("$MeshFormat\n2.2 0 8\n$EndMeshFormat\n$Nodes\n%d\n" % len(nodes))
+        for i, p in enumerate(nodes):
+            f.write("%d %.9g %.9g %.9g\n" % (i + 1, p[0], p[1], p[2]))
+        f.write("$EndNodes\n$Elements\n%d\n" % len(cells))
+        for j, c in enumerate(cells):
+            f.write("%d %d 2 %d %d %s\n" % (j + 1, etype, tag[j], tag[j],
+                                            " ".join(str(int(n) + 1) for n in c)))
+        f.write("$EndElements\n")
+    return msh_path
+
+
 # --------------------------------------------------------------------------- stations
-def list_stations(windio, lo=0.02, hi=0.99, step=0.02):
+def windio_stations(windio):
+    """The blade's OWN spanwise stations, straight from the windIO
+    outer_shape.airfoils list -- (r, airfoil_name) sorted by r.  These are the ONLY
+    stations the mesher uses: no interpolated r that the windIO does not define."""
+    raw = yaml.safe_load(open(windio))
+    try:
+        afs = raw["components"]["blade"]["outer_shape"]["airfoils"]
+    except KeyError:
+        afs = raw["components"]["blade"]["outer_shape_bem"]["airfoils"]
+    return sorted((float(a["spanwise_position"]), str(a["name"])) for a in afs)
+
+
+def prev_station(windio, r):
+    """The windIO station immediately toward the root of r (for the default taper span)."""
+    rs = [s[0] for s in windio_stations(windio)]
+    below = [x for x in rs if x < r - 1e-6]
+    return below[-1] if below else rs[0]
+
+
+def list_stations(windio):
     blade = load_blade(windio)
+    stations = windio_stations(windio)
     print("windIO: %s" % windio)
-    print("spanwise stations (non-dimensional r):")
-    print("  %-6s %-9s %-6s %-7s %s" % ("r", "chord[m]", "webs", "z[m]", "status"))
+    print("blade-defined spanwise stations (use ONLY these r):")
+    print("  %-8s %-22s %-9s %-6s %-7s %s" % ("r", "airfoil", "chord[m]", "webs", "z[m]", "mesh"))
     valid = []
-    r = lo
-    while r <= hi + 1e-9:
-        r = round(r, 3)
+    for r, name in stations:
         try:
             cs = build_cross_section(blade, r, mesh_size=0.03)
-            print("  %-6.2f %-9.3f %-6d %-7.2f OK" % (r, cs["chord"], len(cs["webs"]), blade_z(blade, r)))
-            valid.append(r)
+            webs = len(cs["webs"])
+            ok = "yes" if webs >= 1 and "circular" not in name.lower() else "no (circular/root)"
+            print("  %-8.4f %-22s %-9.3f %-6d %-7.2f %s" % (r, name, cs["chord"], webs, blade_z(blade, r), ok))
+            if ok == "yes":
+                valid.append(round(r, 4))
         except Exception as e:
-            print("  %-6.2f %-9s %-6s %-7s no airfoil (%s)" % (r, "-", "-", "-", str(e)[:32]))
-        r += step
+            print("  %-8.4f %-22s %-9s %-6s %-7s no airfoil (%s)" % (r, name, "-", "-", "-", str(e)[:24]))
     if valid:
-        print("\nvalid range: r = %.2f .. %.2f  (pick any pair r1<r2 for a taper, or one r for a boundary)"
-              % (min(valid), max(valid)))
+        print("\nmeshable airfoil stations: r = %s" % ", ".join("%.4f" % v for v in valid))
+        print("boundary: pick ONE r.  taper: pick a station r (spans the previous station->r), "
+              "or give an explicit windIO station pair r1,r2.")
     return valid
 
 
@@ -105,7 +157,7 @@ def build_taper(windio, r1, r2, model, out, reference="OML", nr=4, nsp=12, nw=3,
         print("  solid: %d nodes / %d hexes ; gates PASS (min SJ %.3f)" % (len(nodes), len(hexes), msj))
         _render_hex(nodes, hexes, hmats, mat_names, p.replace(".yaml", ".png"),
                     "SOLID taper %s (by material)" % tag)
-        written += [p, p.replace(".yaml", ".png")]
+        written += [p, yaml_to_msh(p), p.replace(".yaml", ".png")]
 
     if model in ("shell", "both"):
         shell = shell_between_sections(res, cs1, cs2, reference=reference)
@@ -117,7 +169,7 @@ def build_taper(windio, r1, r2, model, out, reference="OML", nr=4, nsp=12, nw=3,
         reg = {rr: i for i, rr in enumerate(sorted(set(shell["region_of_quad"])))}
         _render_quad(shell["nodes"], shell["quads"], [reg[rr] for rr in shell["region_of_quad"]],
                      p.replace(".yaml", ".png"), "SHELL taper %s (by region, %s ref)" % (tag, reference))
-        written += [p, p.replace(".yaml", ".png")]
+        written += [p, yaml_to_msh(p), p.replace(".yaml", ".png")]
     return written
 
 
@@ -139,7 +191,7 @@ def build_boundary(windio, r, model, out, reference="OML", nr=4, nw=3, mesh=0.02
         _dump(solid_boundary_payload(res, cs, cs, 0, blade, _mat_block), p)
         print("  solid boundary (2-D quad section) written")
         _render_boundary(p, p.replace(".yaml", ".png"), "SOLID boundary %s (2-D quad, by material)" % tag, quad=True)
-        written += [p, p.replace(".yaml", ".png")]
+        written += [p, yaml_to_msh(p), p.replace(".yaml", ".png")]
 
     if model in ("shell", "both"):
         shell = shell_between_sections(res, cs, cs, reference=reference)
@@ -147,7 +199,7 @@ def build_boundary(windio, r, model, out, reference="OML", nr=4, nw=3, mesh=0.02
         _dump(shell_boundary_payload(res, shell, cs, cs, 0, blade, _mat_block), p)
         print("  shell boundary (1-D contour on %s) written" % reference)
         _render_boundary(p, p.replace(".yaml", ".png"), "SHELL boundary %s (1-D, %s ref)" % (tag, reference), quad=False)
-        written += [p, p.replace(".yaml", ".png")]
+        written += [p, yaml_to_msh(p), p.replace(".yaml", ".png")]
     return written
 
 
@@ -200,6 +252,8 @@ def main():
     ap.add_argument("windio")
     ap.add_argument("mode", choices=["stations", "boundary", "taper"])
     ap.add_argument("--r", type=float); ap.add_argument("--r1", type=float); ap.add_argument("--r2", type=float)
+    ap.add_argument("--to-root", action="store_true",
+                    help="taper: with --r R only, build the segment [R-step, R] (adjacent station toward root)")
     ap.add_argument("--model", choices=["solid", "shell", "both"], default="both")
     ap.add_argument("--reference", choices=["OML", "mid"], default="OML")
     ap.add_argument("--out", default=os.path.join(HERE, "mesh_out"))
@@ -213,8 +267,12 @@ def main():
         w = build_boundary(a.windio, a.r, a.model, a.out, a.reference, a.nr, a.nw, a.mesh)
         print("\nOUTPUTS:", *w, sep="\n  ")
     else:
-        assert a.r1 is not None and a.r2 is not None, "taper needs --r1 and --r2"
-        w = build_taper(a.windio, a.r1, a.r2, a.model, a.out, a.reference, a.nr, a.nsp, a.nw, a.mesh)
+        r1, r2 = a.r1, a.r2
+        if r1 is None or r2 is None:                       # single windIO station: span from the one toward root
+            assert a.r is not None, "taper needs --r1 --r2 (windIO stations), or a single --r (uses the adjacent windIO station toward root)"
+            r2 = a.r
+            r1 = prev_station(a.windio, a.r)
+        w = build_taper(a.windio, r1, r2, a.model, a.out, a.reference, a.nr, a.nsp, a.nw, a.mesh)
         print("\nOUTPUTS:", *w, sep="\n  ")
 
 
