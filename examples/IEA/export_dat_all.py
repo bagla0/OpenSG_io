@@ -65,11 +65,12 @@ for name, H, S in BLOCKS:
                                for i in range(6))]
 
 lines += ["", "#" + "=" * 78,
-          "# NOTE  EA/EI (extension+bending) agree to <10%: geometry, NuMAD material",
-          "#       orientation and span-interpolated layup are validated.  GA2/GA3/GJ",
-          "#       (transverse shear + torsion) run ~13x stiff in the shell = the RM",
-          "#       soft-core over-prediction (24/72 panels are 70 mm foam sandwiches);",
-          "#       trust the SOLID for the shear/torsion terms.  See comparison notes.", ""]
+          "# NOTE  Solid hex layers are PLY-CONFORMING (layer interfaces at ply-group",
+          "#       boundaries, NuMAD guide-surface style) so the 3 mm sandwich skins are",
+          "#       meshed exactly.  EA/EI and GA2 agree to a few %%; the remaining",
+          "#       GA3/GJ/EI2 offsets (~10-35%%) are the genuine RM-shell vs 3-D-solid",
+          "#       model difference on thick foam-sandwich walls (single-director FSDT",
+          "#       vs zig-zag through the soft core), NOT a mesh artifact.", ""]
 
 txt = "\n".join(lines)
 for d in (ONEDRIVE, OUT):

@@ -90,14 +90,16 @@ def wall_clearance(oml, m_in, opposing=-0.2):
     return c
 
 
-def _fold_nodes_stack(oml, depth, nsub):
+def _fold_nodes_stack(oml, depth, nsub, fracs=None):
     """Hard verifier over the WHOLE ring stack: nodes involved in any fold.
 
     Cell area is QUADRATIC in the layer index, so an intermediate sub-cell can invert
     (offset caustic where neighbouring normal rays cross inside the wall) while the
     full-depth cell stays positive -- every consecutive sub-ring pair must be checked,
     plus self-intersection of every sub-ring.  depth (N,2) = full-depth INWARD
-    displacement vector per node (d*s*m_in), ADDED to the contour.
+    displacement vector per node (d*s*m_in), ADDED to the contour.  fracs (N, nsub+1)
+    optional = the ACTUAL (possibly ply-conforming, non-uniform) ring fractions --
+    verify the rings that will really be built, not a uniform stand-in.
 
     Returns (local, crossing) bool masks: `local` = non-positive hoop cells and
     near-adjacent crossings (corner bowties where hoop spacing < depth at a kink --
@@ -106,7 +108,10 @@ def _fold_nodes_stack(oml, depth, nsub):
     N = len(oml)
     local = np.zeros(N, bool)
     crossing = np.zeros(N, bool)
-    rings = [oml + (l / nsub) * depth for l in range(nsub + 1)]
+    if fracs is None:
+        rings = [oml + (l / nsub) * depth for l in range(nsub + 1)]
+    else:
+        rings = [oml + np.asarray(fracs)[:, l:l + 1] * depth for l in range(nsub + 1)]
     for l in range(nsub):
         lo, cr = _fold_nodes(rings[l], rings[l + 1])
         local |= lo
@@ -271,12 +276,18 @@ def open_thin_gaps(oml, tnode, nr=4, miter_limit=2.0, eta=0.88, verify_iters=25,
     return Pc, moved
 
 
-def offset_rings(oml, tnode, nr, miter_limit=2.0, safety=0.45, verify_iters=40):
+def offset_rings(oml, tnode, nr, miter_limit=2.0, safety=0.45, verify_iters=40,
+                 fracs=None):
     """Structured through-thickness rings of a closed contour -- CLAMP strategy
     (geometry preserved; the stack is locally thinned where it cannot fit).
 
     oml (N,2): outer mold line nodes.  tnode (N,): local wall thickness at each node.
     nr: number of through-thickness layers (nr+1 rings, ring 0 = OML).
+    fracs (N, nr+1) optional: PLY-CONFORMING cumulative depth fractions per node (ring
+    l of node i at depth fracs[i,l]*tnode[i]); default = uniform l/nr.  Ply-conforming
+    rings put the hex layer interfaces AT the ply boundaries so thin skins survive in
+    the solid (NuMAD guide-surface idea) -- with uniform layers a 3 mm skin on a 76 mm
+    sandwich wall vanishes (every layer midpoint samples the core).
 
     Returns rings (nr+1, N, 2) and fscale (N,) -- the thin-gap scale actually applied
     (1 everywhere the nominal laminate fits).  The result is VERIFIED fold-free: any
@@ -284,11 +295,17 @@ def offset_rings(oml, tnode, nr, miter_limit=2.0, safety=0.45, verify_iters=40):
     oml, flipped = ensure_ccw(np.asarray(oml, float))
     t = np.asarray(tnode, float)
     tc = t[::-1].copy() if flipped else t.copy()
+    if fracs is None:
+        fr = np.tile(np.linspace(0.0, 1.0, nr + 1), (len(oml), 1))
+    else:
+        fr = np.asarray(fracs, float)
+        fr = fr[::-1].copy() if flipped else fr.copy()
     m_in, s = miter_normals(oml, miter_limit)
     c = wall_clearance(oml, m_in)
     f = clamp_depths(tc, s, c, safety=safety)
     for _ in range(verify_iters):
-        local, crossing = _fold_nodes_stack(oml, (tc * f * s)[:, None] * m_in, nr)
+        local, crossing = _fold_nodes_stack(oml, (tc * f * s)[:, None] * m_in, nr,
+                                            fracs=fr)
         bad = local | crossing                             # clamp handles every fold kind
         if not bad.any():
             break
@@ -296,7 +313,7 @@ def offset_rings(oml, tnode, nr, miter_limit=2.0, safety=0.45, verify_iters=40):
         f[badw] *= 0.75
     rings = np.empty((nr + 1, len(oml), 2))
     for l in range(nr + 1):
-        d = (l / nr) * tc * f * s
+        d = fr[:, l] * tc * f * s
         rings[l] = oml + d[:, None] * m_in                 # +m_in = move INWARD
     if flipped:
         return rings[:, ::-1], f[::-1]

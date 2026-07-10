@@ -132,3 +132,77 @@ class TaperLaminate:
         """The plies that drop within the segment (present at one end, gone at the
         other) -- the ply-drop manifest, for reporting."""
         return [g for g in self.plies if g.is_drop]
+
+    # ---------------- ply-conforming through-thickness layer grouping ----------------
+    #
+    # A structured hex wall with nr EQUAL layers destroys a sandwich: a 3 mm skin on a
+    # 76 mm wall is thinner than one 19 mm layer, so every layer-midpoint samples the
+    # core and the skins vanish from the solid (measured: ALL panel hexes = foam ->
+    # section GA/GJ collapse ~10x).  NuMAD solves this with ply-conforming guide
+    # surfaces (editStacksForSolidMesh normalizes every stack to a fixed number of ply
+    # GROUPS and offsets one guide surface per group, BladeDef.m:1571-1625/1666-1735).
+    # Same idea here: group the plies into exactly nr contiguous groups with cuts AT
+    # PLY BOUNDARIES (merging the thinnest neighbours when there are too many plies,
+    # splitting the thickest group internally when too few), so hex layer l IS ply
+    # group l and carries its dominant ply's material exactly -- for any nr.
+
+    def group_cuts(self, nr: int, tau_ref: float = 0.5):
+        """nr-1 interior cuts as (ply_index, alpha): cumulative depth of cut =
+        sum(t_0..t_{i-1}) + alpha*t_i, evaluated with the ply thicknesses at any tau
+        (so cuts move continuously along the span).  alpha=0 -> the ply's OUTER
+        boundary.  Chosen on the tau_ref thicknesses."""
+        t = [max(g.thickness(tau_ref), 0.0) for g in self.plies]
+        n = len(t)
+        # start with every ply its own group (cuts at all interior ply boundaries)
+        cuts = [(i, 0.0) for i in range(1, n)]
+        # too many groups -> merge the adjacent pair with the smallest combined
+        # thickness (NuMAD's thin-ply merge), dropping the cut between them
+        def group_spans(cuts_):
+            pos = [0.0] + [sum(t[:i]) + a * t[i] for (i, a) in cuts_] + [sum(t)]
+            return [(pos[k], pos[k + 1]) for k in range(len(pos) - 1)]
+        while len(cuts) > nr - 1:
+            spans = group_spans(cuts)
+            pair = min(range(len(cuts)),
+                       key=lambda k: (spans[k][1] - spans[k][0]) + (spans[k + 1][1] - spans[k + 1][0]))
+            cuts.pop(pair)
+        # too few -> split the thickest group at its mid-depth (inside one ply)
+        while len(cuts) < nr - 1:
+            spans = group_spans(cuts)
+            k = max(range(len(spans)), key=lambda q: spans[q][1] - spans[q][0])
+            mid = 0.5 * (spans[k][0] + spans[k][1])
+            acc = 0.0
+            for i in range(n):
+                if acc + t[i] >= mid - 1e-15:
+                    alpha = 0.0 if t[i] <= 1e-15 else (mid - acc) / t[i]
+                    cuts.append((i, float(min(max(alpha, 0.0), 1.0))))
+                    break
+                acc += t[i]
+            cuts.sort(key=lambda ia: sum(t[:ia[0]]) + ia[1] * t[ia[0]])
+        return cuts
+
+    def group_fractions(self, cuts, tau: float):
+        """(nr+1,) cumulative through-thickness FRACTIONS of the group interfaces at
+        span fraction tau (0=OML, 1=inner surface), from the given cuts."""
+        t = [max(g.thickness(tau), 0.0) for g in self.plies]
+        T = sum(t)
+        if T <= 0:
+            return [l / max(1, len(cuts) + 1) for l in range(len(cuts) + 2)]
+        pos = [0.0] + [sum(t[:i]) + a * t[i] for (i, a) in cuts] + [T]
+        return [p / T for p in pos]
+
+    def group_material(self, cuts, l: int, tau: float):
+        """(material, angle) of hex layer l = the DOMINANT (thickest) ply inside group
+        l's depth span at span fraction tau."""
+        t = [max(g.thickness(tau), 0.0) for g in self.plies]
+        T = sum(t)
+        pos = [0.0] + [sum(t[:i]) + a * t[i] for (i, a) in cuts] + [T]
+        lo, hi = pos[l], pos[l + 1]
+        best, bl = None, -1.0
+        acc = 0.0
+        for i, g in enumerate(self.plies):
+            a, b = acc, acc + t[i]
+            acc = b
+            ov = min(b, hi) - max(a, lo)
+            if ov > bl:
+                bl, best = ov, g
+        return best.material, best.angle

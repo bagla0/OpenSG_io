@@ -110,8 +110,16 @@ def _contour_pt(cs, s):
     return np.array([np.interp(s, sa, xy[:, 0]), np.interp(s, sa, xy[:, 1])])
 
 
-def build_station(cs, skel, si, nr=4):
+def build_station(cs, skel, si, nr=4, frac_int=None, hoop_frac=None):
     """Realize the canonical skeleton at ONE station.
+
+    frac_int (nint, nr+1) optional: PLY-CONFORMING cumulative depth fractions per
+    hoop interval at this station's span position (from TaperLaminate.group_fractions)
+    -- the hex layer interfaces then sit at the ply-group boundaries so thin sandwich
+    skins survive in the solid (NuMAD guide-surface idea).  Default = uniform.
+    hoop_frac optional dict {interval k: (counts[k]+1,) fractions}: non-uniform hoop
+    subdivision of the web junction BANDS so the web's across-thickness hex columns
+    follow the WEB laminate's ply groups (same skin-survival fix for the webs).
 
     Returns dict(hoop_s, oml, rings, fscale, tnode, NC) plus the
     section topology helpers shared by all stations (ids are identical by construction)."""
@@ -119,7 +127,11 @@ def build_station(cs, skel, si, nr=4):
     counts, kinds = skel["counts"], skel["kinds"]
     hoop_s, hoop_kind = [], []
     for k in range(len(counts)):
-        ss = np.linspace(breaks[k], breaks[k + 1], counts[k] + 1)[:-1]
+        if hoop_frac is not None and k in hoop_frac:       # ply-conforming band columns
+            hf = np.asarray(hoop_frac[k], float)
+            ss = (breaks[k] + hf * (breaks[k + 1] - breaks[k]))[:-1]
+        else:
+            ss = np.linspace(breaks[k], breaks[k + 1], counts[k] + 1)[:-1]
         hoop_s += list(ss)
         hoop_kind += [k] * counts[k]
     hoop_s = np.array(hoop_s)
@@ -136,6 +148,13 @@ def build_station(cs, skel, si, nr=4):
         tint.append(_thick(_lam_tuple(cs, sid)))
     tnode = np.array([0.5 * (tint[hoop_kind[i]] + tint[hoop_kind[i - 1]]) for i in range(NC)])
 
+    # per-node ring fractions = mean of the two adjacent intervals' ply-group profiles
+    # (same blending as tnode; keeps the rings hoop-continuous across region borders)
+    fracs = None
+    if frac_int is not None:
+        frac_int = np.asarray(frac_int, float)
+        fracs = 0.5 * (frac_int[hoop_kind] + frac_int[np.roll(hoop_kind, 1)])
+
     # FULL-ACCURACY trailing edge (NuMAD expandBladeGeometryTEs device): first OPEN the
     # contour wherever the gap cannot host the full nominal laminate of both walls, so
     # ply thicknesses are preserved exactly at the TE (commercial benchmark behavior);
@@ -143,7 +162,7 @@ def build_station(cs, skel, si, nr=4):
     # (signed-area orientation, bisector normals, thin-gap clamp as a mere backstop --
     # after the opening the clamp should not engage, fscale = 1 everywhere).
     oml_open, te_moved = open_thin_gaps(oml, tnode, nr=nr)
-    rings, fscale = offset_rings(oml_open, tnode, nr)
+    rings, fscale = offset_rings(oml_open, tnode, nr, fracs=fracs)
     return dict(hoop_s=hoop_s, hoop_kind=np.array(hoop_kind), oml=oml_open, rings=rings,
                 fscale=fscale, te_moved=te_moved, tnode=tnode, NC=NC)
 
@@ -166,9 +185,27 @@ def build_section_mesh(cs_list, skel, nr=4, ny_target=None):
 
     Returns dict(faces2d, ftag (list of ('skin',set_id,layer) / ('web',wi,col)),
     stations=[(NP,3) coords ...] (z=0 plane), NP, shell (mid-surface line topology),
-    NYs, bands)."""
+    NYs, bands, tl_by_region, cuts_by_region)."""
     ns = len(cs_list)
-    st = [build_station(cs, skel, i, nr) for i, cs in enumerate(cs_list)]
+    # PLY-CONFORMING layer profiles: group each region's (span-interpolated) laminate
+    # into exactly nr contiguous ply groups; ring l then follows ply-group boundary l
+    # around the hoop and along the span (NuMAD editStacksForSolidMesh + guide surfaces)
+    tl_by_region = region_taper_laminates(cs_list[0], cs_list[-1], skel)
+    nint = len(skel["kinds"])
+    cuts_by_region = {("R", k): tl_by_region[("R", k)].group_cuts(nr) for k in range(nint)}
+    for wi in range(len(cs_list[0]["webs"])):
+        nw_k = next(skel["counts"][k] for k in range(nint) if skel["kinds"][k][0] == "band"
+                    and skel["kinds"][k][1] == wi)
+        cuts_by_region[("web", wi)] = tl_by_region[("web", wi)].group_cuts(nw_k)
+    st = []
+    for i, cs in enumerate(cs_list):
+        tau = i / max(1, ns - 1)
+        fi = np.array([tl_by_region[("R", k)].group_fractions(cuts_by_region[("R", k)], tau)
+                       for k in range(nint)])
+        hoop_frac = {k: tl_by_region[("web", skel["kinds"][k][1])].group_fractions(
+                        cuts_by_region[("web", skel["kinds"][k][1])], tau)
+                     for k in range(nint) if skel["kinds"][k][0] == "band"}
+        st.append(build_station(cs, skel, i, nr, frac_int=fi, hoop_frac=hoop_frac))
     NC = st[0]["NC"]
     bands = _band_cols(skel, 0)
     webs0 = cs_list[0]["webs"]
@@ -259,7 +296,7 @@ def build_section_mesh(cs_list, skel, nr=4, ny_target=None):
     faces2d[area2 < 0] = faces2d[area2 < 0][:, ::-1]
     return dict(faces2d=faces2d, ftag=ftag, fregion=fregion, fn2d=np.array(fn2d),
                 stations=stations, NP=NP, NC=NC, nr=nr, NYs=NYs, wpair=wpair, st=st,
-                bands=bands)
+                bands=bands, tl_by_region=tl_by_region, cuts_by_region=cuts_by_region)
 
 
 # --------------------------------------------------------------------------- hex loft
@@ -467,23 +504,18 @@ def solid_boundary_payload(res, cs1, cs2, si, blade, mat_block):
     Beam axis is +z (out of plane); each quad carries the ply material at its
     (region, layer) of the span-interpolated laminate and a fiber frame about +z."""
     from .orientation import element_frame
-    sec = res["sec"]; NP = sec["NP"]; nr = sec["nr"]; fn2d = sec["fn2d"]
+    sec = res["sec"]; NP = sec["NP"]; fn2d = sec["fn2d"]
     faces2d, ftag, fregion = sec["faces2d"], sec["ftag"], sec["fregion"]
+    tl_by_region, cuts_by_region = sec["tl_by_region"], sec["cuts_by_region"]
     z_end = res["z1"] if si == 0 else res["z2"]
     tau = 0.0 if si == 0 else 1.0
     off = _end_layer(NP, si, res["nsp"])
     P = res["nodes"][off:off + NP]                          # (NP,3) end-station coords
-    tl_by_region = region_taper_laminates(cs1, cs2, res["skel"])
     zhat = np.array([0.0, 0.0, 1.0])
     fmats, oris = [], []
     for k, (tag, f) in enumerate(zip(ftag, faces2d)):
-        tl = tl_by_region[fregion[k]]
-        if tag[0] == "skin":
-            frac = (tag[2] + 0.5) / nr
-        else:
-            ncols = len(sec["wpair"][tag[1]][0]) - 1
-            frac = (tag[2] + 0.5) / max(1, ncols)
-        m, ang = tl.ply_of_depth(tau, frac)
+        key = fregion[k]
+        m, ang = tl_by_region[key].group_material(cuts_by_region[key], tag[2], tau)
         fmats.append(m)
         n_surf = np.array([fn2d[k][0], fn2d[k][1], 0.0])
         oris.append(element_frame(zhat, n_surf, ang))
@@ -605,23 +637,20 @@ def solid_yaml_payload(res, cs1, cs2=None):
     from .orientation import element_frame
     cs2 = cs2 or cs1
     nodes, hexes, htag = res["nodes"], res["hexes"], res["htag"]
-    sec = res["sec"]; nr = sec["nr"]; fn2d = sec["fn2d"]; fregion = sec["fregion"]
+    sec = res["sec"]; fn2d = sec["fn2d"]; fregion = sec["fregion"]
+    tl_by_region, cuts_by_region = sec["tl_by_region"], sec["cuts_by_region"]
     z1, z2 = res["z1"], res["z2"]
     nf = len(sec["faces2d"])
-    tl_by_region = region_taper_laminates(cs1, cs2, res["skel"])
     oris = np.zeros((len(hexes), 9))
     mats = []
     for k, (tag, hx) in enumerate(zip(htag, hexes)):
         f = k % nf
         zc = float(nodes[hx].mean(0)[2])
         tau = 0.0 if abs(z2 - z1) < 1e-12 else np.clip((zc - z1) / (z2 - z1), 0.0, 1.0)
-        tl = tl_by_region[fregion[f]]
-        if tag[0] == "skin":
-            frac = (tag[2] + 0.5) / nr
-        else:
-            ncols = len(sec["wpair"][tag[1]][0]) - 1
-            frac = (tag[2] + 0.5) / max(1, ncols)
-        m, ang = tl.ply_of_depth(tau, frac)
+        key = fregion[f]
+        # EXACT per-layer material: hex layer l IS ply group l (ply-conforming rings),
+        # so no depth sampling -- a 3 mm skin can never vanish under a 19 mm layer
+        m, ang = tl_by_region[key].group_material(cuts_by_region[key], tag[2], tau)
         span = nodes[hx[4]] - nodes[hx[0]]
         n_surf = np.array([fn2d[f][0], fn2d[f][1], 0.0])
         oris[k] = element_frame(span, n_surf, ang)

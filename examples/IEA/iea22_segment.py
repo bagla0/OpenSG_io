@@ -42,7 +42,7 @@ WINDIO = sys.argv[1] if len(sys.argv) > 1 else os.path.join(REPO, "examples", "d
 R1 = float(sys.argv[2]) if len(sys.argv) > 2 else 0.20
 R2 = float(sys.argv[3]) if len(sys.argv) > 3 else 0.30
 NR = int(os.environ.get("IEA_NR", "4"))                  # through-thickness layers (solid)
-NSP, NW, MESH = 12, 2, 0.02
+NSP, NW, MESH = 12, 3, 0.02                              # NW=3: web columns = [skin|core|skin]
 OUT = os.path.join(HERE, "output")
 os.makedirs(OUT, exist_ok=True)
 
