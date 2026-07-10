@@ -50,8 +50,12 @@ def _station_breaks(cs):
             bands.append((sw - u, sw + u, "band:%s:%s" % (w["name"], tag)))
     segb = [(float(seg["s_a"]), "seg:%d" % k) for k, seg in enumerate(cs["segments"])]
     segb.append((float(cs["segments"][-1]["s_b"]), "seg:end"))
+    # drop segment breakpoints inside OR within a band-proportional TOLERANCE of a band:
+    # a layup breakpoint a hair outside a THIN band (e.g. plies scaled to 0.2h shrink the
+    # band 5x) would otherwise create a sliver hoop interval -> degenerate (concave)
+    # junction cells that invert even a prismatic loft.
     inside = {lab for v, lab in segb
-              if any(lo + 1e-12 < v < hi - 1e-12 for lo, hi, _n in bands)}
+              if any(lo - 0.35 * (hi - lo) < v < hi + 0.35 * (hi - lo) for lo, hi, _n in bands)}
     brks = segb + [(lo, nm + ":lo") for lo, _hi, nm in bands] + [(hi, nm + ":hi") for _lo, hi, nm in bands]
     return brks, inside
 
@@ -205,13 +209,29 @@ def build_section_mesh(cs_list, skel, nr=4, ny_target=None):
     # (a 76->60 mm wall shifts the foam fraction enough to fold near-boundary hexes).
     # Material stays ply-exact: group l is the same plies at any tau, so group_material
     # in the payloads recovers each layer's exact ply regardless of this choice.
+    def _min_sep(fr, fmin=0.04):
+        """Enforce a MINIMUM separation between ply-group fractions (endpoints pinned 0/1).
+        A very thin ply (e.g. every lamina scaled to 0.2h) puts two group boundaries nearly
+        on top of each other -> adjacent web band columns / skin rings COINCIDE -> degenerate
+        (concave, near-zero corner-Jacobian) cells that invert even a PRISMATIC loft.  The
+        clamp trades exact interface position on the degenerate ply (material assignment via
+        group_material is unaffected) for a guaranteed non-degenerate mesh."""
+        fr = np.asarray(fr, float).copy()
+        for i in range(1, len(fr)):
+            fr[i] = max(fr[i], fr[i - 1] + fmin)
+        fr[-1] = 1.0
+        for i in range(len(fr) - 2, 0, -1):
+            fr[i] = min(fr[i], fr[i + 1] - fmin)
+        fr[0] = 0.0
+        return fr
+
     if os.environ.get("OPENSG_UNIFORM_LAYERS"):            # diagnostic: uniform layers
         fi, hoop_frac = None, None
     else:
-        fi = np.array([tl_by_region[("R", k)].group_fractions(cuts_by_region[("R", k)], 0.5)
+        fi = np.array([_min_sep(tl_by_region[("R", k)].group_fractions(cuts_by_region[("R", k)], 0.5))
                        for k in range(nint)])
-        hoop_frac = {k: tl_by_region[("web", skel["kinds"][k][1])].group_fractions(
-                        cuts_by_region[("web", skel["kinds"][k][1])], 0.5)
+        hoop_frac = {k: _min_sep(tl_by_region[("web", skel["kinds"][k][1])].group_fractions(
+                        cuts_by_region[("web", skel["kinds"][k][1])], 0.5))
                      for k in range(nint) if skel["kinds"][k][0] == "band"}
     st = [build_station(cs, skel, i, nr, frac_int=fi, hoop_frac=hoop_frac)
           for i, cs in enumerate(cs_list)]
@@ -263,7 +283,15 @@ def build_section_mesh(cs_list, skel, nr=4, ny_target=None):
             for j in range(len(top)):
                 pt = P[sid(top[j], nr), :2]; pb = P[sid(bot[j], nr), :2]
                 for m in range(1, NY):
-                    tau = 0.5 * (1 - math.cos(math.pi * m / NY))   # cosine: refined at junctions
+                    if os.environ.get("OPENSG_WEB_ROWS") == "uniform":
+                        # UNIFORM depth rows: at very thin walls (e.g. plies scaled to 0.2h)
+                        # the cosine-clustered first row sits so close to the junction that
+                        # the junction cell goes CONCAVE (arrowhead: positive signed area but
+                        # negative corner Jacobian) -> "inverted" hexes even on a PRISMATIC
+                        # loft.  Uniform rows keep the junction cell convex.
+                        tau = m / NY
+                    else:
+                        tau = 0.5 * (1 - math.cos(math.pi * m / NY))   # cosine: refined at junctions
                     P[wid(wi, j, m), :2] = (1 - tau) * pt + tau * pb
         stations.append(P)
 
