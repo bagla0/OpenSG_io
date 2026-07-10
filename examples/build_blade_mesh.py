@@ -206,7 +206,7 @@ def build_taper(windio, r1, r2, model, out, reference="OML", nr=4, nsp=12, nw=3,
           % (r1, r2, cs1["chord"], cs2["chord"], z1, z2, model, reference, element))
     tag = "r%03d_%03d" % (round(r1 * 100), round(r2 * 100))
     written = []
-    need_res = (model in ("shell", "both")) or (model in ("solid", "both") and element == "hex")
+    need_res = (model in ("shell", "both"))
     res = hex_between_sections(cs1, cs2, z1, z2, nr=nr, nsp=nsp, nw=nw, mesh_size=mesh) if need_res else None
 
     if model in ("solid", "both") and element == "tet":
@@ -223,20 +223,18 @@ def build_taper(windio, r1, r2, model, out, reference="OML", nr=4, nsp=12, nw=3,
         written += [p, yaml_to_msh(p), p.replace(".yaml", ".png")]
 
     if model in ("solid", "both") and element == "hex":
-        nodes, hexes = res["nodes"], res["hexes"]
-        msj, ninv = min_scaled_jacobian(nodes, hexes)
-        if ninv:
-            raise RuntimeError(
-                "SOLID hex taper r=%.2f->%.2f has %d inverted hexes (min scaled Jacobian %.3f) -- the thin "
-                "shear webs twist with the airfoil aerodynamic twist over this span.  Use --element tet for a "
-                "robust (never-inverting) mesh, or try a NARROWER / less-twisted station pair." % (r1, r2, ninv, msj))
-        assert_conforming(nodes, hexes, "hex")
-        oris, hmats = solid_yaml_payload(res, cs1, cs2)
+        # STRUCTURED gmsh-transfinite hex: EXACTLY nr(=npl) hexes through every wall (edge division,
+        # decoupled from the in-plane size -> no explosion), so GA/GJ are captured; the thin web cells
+        # fold on steep pairs -> the inversion gate inside windio_taper_hex refuses those (use tet).
+        from opensg_io.tapered_tet import windio_taper_hex
+        nodes, hexes, oris, hmats = windio_taper_hex(cs1, cs2, z1, z2, nr=nr, nw=nw, mesh_size=mesh, nsp=nsp)
+        msj, _ = min_scaled_jacobian(nodes, hexes)
         mat_names = sorted(set(hmats))
         p = os.path.join(out, "%s_solid_taper.yaml" % tag)
         export_solid_yaml(p, nodes, hexes, "hex", oris, _mat_cards(blade, mat_names),
                           sets=_mat_sets(hmats, mat_names))
-        print("  solid (HEX): %d nodes / %d hexes ; gates PASS (min SJ %.3f)" % (len(nodes), len(hexes), msj))
+        print("  solid (HEX, structured npl=%d): %d nodes / %d hexes ; gates PASS (min SJ %.3f)"
+              % (nr, len(nodes), len(hexes), msj))
         _render_hex(nodes, hexes, hmats, mat_names, p.replace(".yaml", ".png"),
                     "SOLID taper %s (HEX, by material)" % tag)
         written += [p, yaml_to_msh(p), p.replace(".yaml", ".png")]

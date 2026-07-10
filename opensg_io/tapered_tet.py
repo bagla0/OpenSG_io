@@ -149,9 +149,12 @@ def windio_taper_tets(cs1, cs2, z1, z2, nr=4, nw=2, mesh_size=0.02, tet_size=Non
     # metre-scale chord/span, so a span-scaled size can't place nodes across the wall and the 2-D
     # mesher loops.  Size from the local wall thickness (mean OML->IML distance).
     wall = float(np.mean(np.linalg.norm(0.5 * (OML0 + OML1) - 0.5 * (IML0 + IML1), axis=1)))
+    # size from the WALL thickness so >=2 tets span it -- transverse-shear (GA) and torsion (GJ)
+    # are through-thickness-gradient quantities and COLLAPSE (up to -86%) if <1 tet spans the wall.
+    # No chord-based floor: that made tet_size ~2x the wall and left the wall unresolved.
     if tet_size is None:
-        tet_size = max(0.5 * wall, 0.02 * chord)             # ~1-2 elements across the wall
-    smin = max(0.35 * wall, 0.004 * chord)
+        tet_size = 0.45 * wall
+    smin = 0.28 * wall
 
     gmsh.initialize()
     gmsh.option.setNumber("General.Terminal", 1 if _vb else 0)
@@ -275,3 +278,104 @@ def windio_taper_tets(cs1, cs2, z1, z2, nr=4, nw=2, mesh_size=0.02, tet_size=Non
         oris[k] = element_frame(np.array([0.0, 0.0, dz if dz else 1.0]), n_surf, ang)
         hmats.append(m)
     return nodes, tets, oris, hmats
+
+
+# ===================================================================================================
+#  STRUCTURED gmsh TRANSFINITE HEX: partition the section into ply-group guide-surface cells and
+#  transfinite-recombine each -> EXACTLY npl(=nr) hexes through every wall (an EDGE division,
+#  decoupled from the in-plane size, so no isotropic explosion), capturing GA/GJ.  The SKIN never
+#  folds; the thin web cells fold on steep pairs -> the min-scaled-Jacobian gate refuses those
+#  honestly (use --element tet there).  This is the user's "partition first, then structured".
+# ===================================================================================================
+def windio_taper_hex(cs1, cs2, z1, z2, nr=4, nw=2, mesh_size=0.02, nsp=None, refine=1):
+    """Tapered webbed-airfoil SOLID as STRUCTURED HEX via gmsh transfinite.  npl = nr through-thickness
+    layers (one per ply group), `refine` hoop subdivisions, `nsp` span subdivisions -- npl is an edge
+    count, fully decoupled from the in-plane size.  Returns (nodes, hexes[8] 0-based, oris[9], hmats).
+    Raises if any hex inverts (thin web cells fold on steep pairs)."""
+    import gmsh
+    from .hex_loft import section_skeleton, build_section_mesh
+    from .orientation import element_frame
+    from .conformity import assert_conforming, min_scaled_jacobian
+
+    skel = section_skeleton([cs1, cs2], mesh_size=mesh_size, nw=nw)
+    sec = build_section_mesh([cs1, cs2], skel, nr=nr)
+    P1, P2 = sec["stations"]; faces = np.asarray(sec["faces2d"]); NP = sec["NP"]
+    ftag = sec["ftag"]; fregion = sec["fregion"]; fn2d = np.asarray(sec["fn2d"])
+    tl = sec["tl_by_region"]; cuts = sec["cuts_by_region"]
+    dz = z2 - z1
+    chord = 0.5 * (cs1["chord"] + cs2["chord"])
+    NSP = int(nsp) if nsp else max(2, min(24, int(round(abs(dz) / max(chord * mesh_size, 1e-6)))))
+
+    gmsh.initialize()
+    gmsh.option.setNumber("General.Terminal", 0)
+    geo = gmsh.model.geo
+    p0 = [geo.addPoint(float(P1[n, 0]), float(P1[n, 1]), z1) for n in range(NP)]
+    p1 = [geo.addPoint(float(P2[n, 0]), float(P2[n, 1]), z2) for n in range(NP)]
+    lc = {}
+
+    def L(a, b):
+        if (a, b) in lc:
+            return lc[(a, b)]
+        if (b, a) in lc:
+            return -lc[(b, a)]
+        t = geo.addLine(a, b); lc[(a, b)] = t
+        return t
+
+    def face(pts):
+        return geo.addSurfaceFilling([geo.addCurveLoop([L(pts[k], pts[(k + 1) % 4]) for k in range(4)])])
+
+    vol_of_cell = []
+    for fc in faces:
+        a, b, c, d = p0[fc[0]], p0[fc[1]], p0[fc[2]], p0[fc[3]]
+        e, f, g, h = p1[fc[0]], p1[fc[1]], p1[fc[2]], p1[fc[3]]
+        z0 = face([a, b, c, d]); zt = face([e, f, g, h])
+        s1 = face([a, b, f, e]); s2 = face([b, c, g, f]); s3 = face([c, d, h, g]); s4 = face([d, a, e, h])
+        vol = geo.addVolume([geo.addSurfaceLoop([z0, zt, s1, s2, s3, s4])])
+        vol_of_cell.append(vol)
+        for (pp, qq) in [(a, b), (b, c), (c, d), (d, a), (e, f), (f, g), (g, h), (h, e)]:
+            geo.mesh.setTransfiniteCurve(abs(L(pp, qq)), refine + 1)
+        for (pp, qq) in [(a, e), (b, f), (c, g), (d, h)]:
+            geo.mesh.setTransfiniteCurve(abs(L(pp, qq)), NSP + 1)
+        for s in [z0, zt, s1, s2, s3, s4]:
+            geo.mesh.setTransfiniteSurface(s); geo.mesh.setRecombine(2, s)
+        geo.mesh.setTransfiniteVolume(vol)
+
+    geo.removeAllDuplicates()
+    geo.synchronize()
+    gmsh.model.mesh.generate(3)
+    ntag, ncoord, _ = gmsh.model.mesh.getNodes()
+    P = ncoord.reshape(-1, 3); id_of = {int(t): i for i, t in enumerate(ntag)}
+    hexes = []; cell_of_hex = []
+    for k, vt in enumerate(vol_of_cell):
+        ets, _etg, enod = gmsh.model.mesh.getElements(3, vt)
+        for et, en in zip(ets, enod):
+            if et == 5:
+                for row in en.reshape(-1, 8):
+                    hexes.append([id_of[int(x)] for x in row]); cell_of_hex.append(k)
+    gmsh.finalize()
+    hexes = np.asarray(hexes, int)
+    used = np.unique(hexes); nodes = P[used]; hexes = np.searchsorted(used, hexes)
+    cell_of_hex = np.asarray(cell_of_hex, int)
+
+    msj, ninv = min_scaled_jacobian(nodes, hexes)
+    if ninv:                                                 # winding vs genuine fold
+        sw = hexes[:, [4, 5, 6, 7, 0, 1, 2, 3]]
+        if min_scaled_jacobian(nodes, sw)[1] == 0:
+            hexes = sw; msj, ninv = min_scaled_jacobian(nodes, hexes)
+    if ninv:
+        raise RuntimeError("STRUCTURED HEX taper: %d inverted hexes (min scaled Jacobian %.3f) -- the "
+                           "thin web cells fold on this (steep) pair.  Use --element tet." % (ninv, msj))
+    assert_conforming(nodes, hexes, "hex")
+
+    oris = np.zeros((len(hexes), 9)); hmats = []
+    for hi, hx in enumerate(hexes):
+        k = int(cell_of_hex[hi]); key = fregion[k]; layer = ftag[k][2]
+        zc = float(nodes[hx].mean(0)[2])
+        tau = 0.0 if abs(dz) < 1e-12 else float(np.clip((zc - z1) / dz, 0.0, 1.0))
+        m, ang = tl[key].group_material(cuts[key], layer, tau)
+        span = nodes[hx[4]] - nodes[hx[0]]
+        if span[2] < 0.0:
+            span = -span
+        oris[hi] = element_frame(span, np.array([fn2d[k][0], fn2d[k][1], 0.0]), ang)
+        hmats.append(m)
+    return nodes, hexes, oris, hmats
