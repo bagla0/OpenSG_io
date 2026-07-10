@@ -49,6 +49,12 @@ def face(pts):
     return geo.addSurfaceFilling([geo.addCurveLoop([L(pts[k], pts[(k + 1) % 4]) for k in range(4)])])
 
 
+def sarea(Pxy, fc):
+    q = Pxy[fc]
+    return float(sum(q[k, 0] * q[(k + 1) % 4, 1] - q[(k + 1) % 4, 0] * q[k, 1] for k in range(4)))
+
+
+GLOBAL = bool(int(os.environ.get("GLOBAL", "0")))           # global hex-dominant recombine (no transfinite)
 t0 = time.time()
 for fc in faces:
     a, b, c, d = (p0[fc[0]], p0[fc[1]], p0[fc[2]], p0[fc[3]])
@@ -56,6 +62,8 @@ for fc in faces:
     z0 = face([a, b, c, d]); zt = face([e, f, g, h])
     s1 = face([a, b, f, e]); s2 = face([b, c, g, f]); s3 = face([c, d, h, g]); s4 = face([d, a, e, h])
     vol = geo.addVolume([geo.addSurfaceLoop([z0, zt, s1, s2, s3, s4])])
+    if GLOBAL:
+        continue                                            # no per-cell transfinite; global recombine below
     for (pp, qq) in [(a, b), (b, c), (c, d), (d, a), (e, f), (f, g), (g, h), (h, e)]:
         geo.mesh.setTransfiniteCurve(abs(L(pp, qq)), 2)
     for (pp, qq) in [(a, e), (b, f), (c, g), (d, h)]:
@@ -63,6 +71,10 @@ for fc in faces:
     for s in [z0, zt, s1, s2, s3, s4]:
         geo.mesh.setTransfiniteSurface(s); geo.mesh.setRecombine(2, s)
     geo.mesh.setTransfiniteVolume(vol)
+if GLOBAL:
+    gmsh.option.setNumber("Mesh.RecombineAll", 1)
+    gmsh.option.setNumber("Mesh.Recombine3DAll", 1)
+    gmsh.option.setNumber("Mesh.RecombinationAlgorithm", 1)
 
 geo.removeAllDuplicates()
 geo.synchronize()
