@@ -126,10 +126,10 @@ def windio_taper_tets(cs1, cs2, z1, z2, nr=4, nw=2, mesh_size=0.02, tet_size=Non
     Returns (nodes[N,3], tets[M,4] 0-based, oris[M,9], hmats[M] material names).
     """
     import gmsh
-    import tempfile
     import time as _time
     from .hex_loft import (section_skeleton, build_station, _lam_tuple, _thick, _set_at, _ply_at)
     from .orientation import element_frame
+    from .conformity import assert_conforming
 
     _vb = bool(os.environ.get("OPENSG_TET_VERBOSE"))
     _t0 = [_time.time()]
@@ -178,45 +178,77 @@ def windio_taper_tets(cs1, cs2, z1, z2, nr=4, nw=2, mesh_size=0.02, tet_size=Non
         tg = [occ.addPoint(float(c[0]), float(c[1]), z) for c in cor]
         return occ.addCurveLoop([occ.addLine(tg[k], tg[(k + 1) % 4]) for k in range(4)])
 
-    parts = list(skin)
+    # Keep the SKIN annulus and each WEB as SEPARATE, conformal OCC volumes (occ.fragment welds
+    # their shared faces).  gmsh meshes the assembly directly (generate 3 -- the fragmented
+    # geometry is properly imprinted, so it does NOT self-intersect at the web-skin T-junctions
+    # the way a single FUSED body did).  Every tet is then tagged by its PHYSICAL VOLUME, so
+    # skin vs web is exact by CONTAINMENT -- no centroid vote that intermixes at the junction.
+    skin_dt = list(skin)
     nwebs = min(len(cs1["webs"]), len(cs2["webs"]))
+    web_dt = []
     for wi in range(nwebs):
         box = occ.addThruSections([web_loop(cs1, cs1["webs"][wi], z1),
                                    web_loop(cs2, cs2["webs"][wi], z2)], makeSolid=True)
         strip, _ = occ.intersect(box, occ.copy(inner), removeObject=True, removeTool=True)
-        parts += strip
+        web_dt.append(strip)
         vb("web %d trimmed" % wi)
     occ.remove(inner, recursive=True)
-    if len(parts) > 1:
-        parts, _ = occ.fuse([parts[0]], parts[1:])
+    parts = skin_dt + [dt for st_ in web_dt for dt in st_]
+    frag, fmap = occ.fragment(parts, [])                     # weld shared faces -> conformal
     occ.synchronize()
-    vb("fused + synchronized (%d parts); meshing surface" % len(parts))
+    # map every OUTPUT volume to its region via the fragment child-map (fmap[j] <- parts[j])
+    region_of_vol = {}
+    for (_d, t) in fmap[0]:
+        region_of_vol[t] = ("skin", -1)
+    off = 1
+    for wi in range(nwebs):
+        for _dt in web_dt[wi]:
+            for (_d, t) in fmap[off]:
+                region_of_vol[t] = ("web", wi)
+            off += 1
+    vols = gmsh.model.getEntities(3)
+    for (_d, t) in vols:
+        gmsh.model.addPhysicalGroup(3, [t], t)
+    vb("fragment -> %d volumes (%d skin, %d web)" % (
+        len(vols), sum(r[0] == "skin" for r in region_of_vol.values()),
+        sum(r[0] == "web" for r in region_of_vol.values())))
 
-    # Mesh only the SURFACE (generate 2) -> STL -> let TetGen do the robust 3-D fill.  Meshing
-    # the fused webbed SOLID directly with generate(3) self-intersects at the web-skin T-junctions
-    # (skin thickness radial vs web thickness horizontal) and hangs; the proven path is
-    # loft-the-outline + TetGen fresh fill (matches webbed_ellipse_surface_stl + tetgen_fill).
     gmsh.option.setNumber("Mesh.MeshSizeMin", smin)
     gmsh.option.setNumber("Mesh.MeshSizeMax", tet_size)
     gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
     gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
     gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
-    gmsh.option.setNumber("Mesh.Algorithm", 5)               # Delaunay 2-D (robust on thin faces)
-    vb("surface size: min=%.4f max=%.4f (wall=%.4f) -> generate(2)" % (smin, tet_size, wall))
-    gmsh.model.mesh.generate(2)
-    stl = stl_path or os.path.join(tempfile.gettempdir(), "opensg_taper_%d.stl" % int(round(abs(dz) * 1000)))
-    gmsh.write(stl)
+    gmsh.option.setNumber("Mesh.Algorithm", 5)
+    gmsh.option.setNumber("Mesh.Algorithm3D", 1)             # Delaunay 3-D
+    vb("mesh size min=%.4f max=%.4f (wall=%.4f) -> generate(3)" % (smin, tet_size, wall))
+    gmsh.model.mesh.generate(3)
+    ntag, ncoord, _ = gmsh.model.mesh.getNodes()
+    P = ncoord.reshape(-1, 3)
+    id_of = {int(t): i for i, t in enumerate(ntag)}
+    tets = []
+    region_of_tet = []
+    for (_d, t) in vols:                                     # read tets grouped BY VOLUME
+        ets, _etg, enod = gmsh.model.mesh.getElements(3, t)
+        reg = region_of_vol.get(t, ("skin", -1))
+        for et, en in zip(ets, enod):
+            if et == 4:
+                conn = en.reshape(-1, 4)
+                for row in conn:
+                    tets.append([id_of[int(x)] for x in row])
+                    region_of_tet.append(reg)
     gmsh.finalize()
-    vb("surface STL written (%s); TetGen filling" % os.path.basename(stl))
-    nodes, tets = tetgen_fill(stl, mindihedral=mindihedral, minratio=minratio)   # gates conformity
-    vb("TetGen done: %d nodes / %d tets; assigning materials" % (len(nodes), len(tets)))
+    tets = np.asarray(tets, int)
+    used = np.unique(tets); nodes = P[used]; tets = np.searchsorted(used, tets)
+    assert_conforming(nodes, tets, "tet")                    # gate: refuse non-conforming
+    vb("generate(3): %d nodes / %d tets; assigning materials by volume" % (len(nodes), len(tets)))
 
-    # ---- per-tet material + NuMAD orientation by centroid point-location -------------------
+    # ---- per-tet material + NuMAD orientation.  REGION (skin vs which web) is from the tet's
+    #      owning physical VOLUME (clean, no intermixing); the ply within the region is from the
+    #      tet's through-thickness/across-web fraction; skin segment from the EXACT arc. ----------
     oris = np.zeros((len(tets), 9))
     hmats = []
     for k, tet in enumerate(tets):
-        c = nodes[tet].mean(0)
-        cxy = c[:2]
+        c = nodes[tet].mean(0); cxy = c[:2]
         tau = 0.0 if abs(dz) < 1e-12 else float(np.clip((c[2] - z1) / dz, 0.0, 1.0))
         cs = cs1 if tau < 0.5 else cs2
         st = st1 if tau < 0.5 else st2
@@ -226,28 +258,19 @@ def windio_taper_tets(cs1, cs2, z1, z2, nr=4, nw=2, mesh_size=0.02, tet_size=Non
         Po, Pi = OMLt[i], IMLt[i]
         inward = Pi - Po; tskin = float(np.hypot(*inward)) or 1e-9; inward = inward / tskin
         depth = float((cxy - Po) @ inward)
-        # nearest web
-        wbest, dwbest, sbest, twbest = -1, 1e30, 0.0, 1e-9
-        for wi in range(nwebs):
-            w = cs["webs"][wi]
+        reg = region_of_tet[k]
+        if reg[0] == "web":
+            w = cs["webs"][reg[1]]
+            lam = _lam_tuple(cs, w["lam"])
             Pa = np.asarray(cs["nodes"][w["a"]], float); Pb = np.asarray(cs["nodes"][w["b"]], float)
-            dperp, sside = _seg_dist(cxy, Pa, Pb)
-            if dperp < dwbest:
-                wbest, dwbest, sbest = wi, dperp, sside
-                twbest = _thick(_lam_tuple(cs, w["lam"]))
-        is_web = (depth > 1.25 * tskin) and (wbest >= 0) and (dwbest <= 0.75 * twbest)
-        if is_web:
-            lam = _lam_tuple(cs, cs["webs"][wbest]["lam"])
-            frac = float(np.clip(sbest / twbest + 0.5, 0.0, 1.0))
-            m, ang = _ply_at(lam, frac)
-            Pa = np.asarray(cs["nodes"][cs["webs"][wbest]["a"]], float)
-            Pb = np.asarray(cs["nodes"][cs["webs"][wbest]["b"]], float)
+            twidth = _thick(lam)
+            _dp, sside = _seg_dist(cxy, Pa, Pb)
+            m, ang = _ply_at(lam, float(np.clip(sside / (twidth or 1e-9) + 0.5, 0.0, 1.0)))
             t = Pb - Pa; t = t / (np.hypot(*t) or 1e-9)
             n_surf = np.array([-t[1], t[0], 0.0])            # across-web in-plane normal
         else:
             lam = _lam_tuple(cs, _set_at(cs, float(st["hoop_s"][i])))
-            frac = float(np.clip(depth / tskin, 0.0, 1.0))
-            m, ang = _ply_at(lam, frac)
+            m, ang = _ply_at(lam, float(np.clip(depth / tskin, 0.0, 1.0)))
             n_surf = np.array([-inward[0], -inward[1], 0.0])  # outward normal; e3 = inward
         oris[k] = element_frame(np.array([0.0, 0.0, dz if dz else 1.0]), n_surf, ang)
         hmats.append(m)
