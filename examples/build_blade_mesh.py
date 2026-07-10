@@ -66,7 +66,13 @@ def yaml_to_msh(yaml_path, msh_path=None):
     else:                                                  # [x,y,z] / 0-based
         nodes = [list(map(float, r)) for r in rows]
         cells = [list(map(int, e)) for e in d["elements"]]
-    etype = {8: 5, 4: 3, 3: 2, 2: 1}[len(cells[0])]        # hex/quad/tri/line -> gmsh type
+    n0 = len(cells[0])
+    if n0 == 4:                                            # 4 nodes: tet (3-D volume) or quad (planar)
+        q = np.array(nodes)[cells[0]]
+        vol = abs(float(np.dot(np.cross(q[1] - q[0], q[2] - q[0]), q[3] - q[0])))
+        etype = 4 if vol > 1e-12 else 3                    # gmsh 4 = tet, 3 = quad
+    else:
+        etype = {8: 5, 3: 2, 2: 1}[n0]                     # hex / tri / line -> gmsh type
     tag = [1] * len(cells)
     for si, s in enumerate(d.get("sets", {}).get("element", [])):
         for lab in s["labels"]:
@@ -127,39 +133,112 @@ def list_stations(windio):
     return valid
 
 
+def write_blade_dat(windio, out):
+    """Whenever a windIO blade is read, dump the MAIN BLADE DATA as a .dat table so the user
+    can see the blade at a glance: one row per windIO station -- r (nondim span, ROOT 0 -> TIP 1),
+    airfoil name, chord, twist, #shear-webs, span z, and whether it is meshable -- plus a header
+    with the blade span length and the material list.  Returns the .dat path."""
+    os.makedirs(out, exist_ok=True)
+    blade = load_blade(windio)
+    stations = windio_stations(windio)
+    stem = os.path.splitext(os.path.basename(windio))[0]
+    path = os.path.join(out, "%s_blade.dat" % stem)
+    try:
+        length = float(blade.osh["reference_axis"]["z"]["values"][-1])
+    except Exception:
+        length = blade_z(blade, 1.0)
+    rows = []
+    for r, name in stations:
+        z = blade_z(blade, r)
+        try:
+            cs = build_cross_section(blade, r, mesh_size=0.05)
+            nweb = len(cs["webs"])
+            tw = float(cs.get("twist", 0.0) or 0.0)          # build_cross_section stores twist in DEGREES
+            meshable = "yes" if (nweb >= 1 and "circular" not in name.lower()) else "no"
+            rows.append((r, name, cs["chord"], tw, nweb, z, meshable))
+        except Exception:
+            rows.append((r, name, float("nan"), float("nan"), 0, z, "no"))
+    try:
+        mats = ", ".join(sorted(blade.mats.keys()))
+    except Exception:
+        mats = "?"
+    with open(path, "w") as f:
+        f.write("# OpenSG_io -- blade summary (auto-written whenever a windIO file is read)\n")
+        f.write("# windIO source     : %s\n" % os.path.basename(windio))
+        f.write("# blade span length : %.4f m\n" % length)
+        f.write("# windIO stations   : %d   (r = non-dimensional span, ROOT r=0 -> TIP r=1)\n" % len(rows))
+        f.write("# materials         : %s\n" % mats)
+        f.write("# meshable          : yes = webbed airfoil section (SG mesh available); "
+                "no = circular root / no webs\n#\n")
+        f.write("# %-8s %-22s %-10s %-11s %-5s %-10s %s\n"
+                % ("r", "airfoil", "chord[m]", "twist[deg]", "webs", "z[m]", "meshable"))
+        for (r, name, chord, tw, nweb, z, meshable) in rows:
+            cs_ = "%-10.4f" % chord if chord == chord else "%-10s" % "-"     # nan-safe
+            tw_ = "%-11.3f" % tw if tw == tw else "%-11s" % "-"
+            f.write("%-10.4f %-22s %s %s %-5d %-10.3f %s\n" % (r, name, cs_, tw_, nweb, z, meshable))
+    print("blade summary .dat -> %s" % path)
+    return path
+
+
+def _mat_cards(blade, mat_names):
+    return [{"name": m, **{k: _mat_block(blade, m)["elastic"][k] for k in ("E", "G", "nu")},
+             "rho": _mat_block(blade, m)["density"]} for m in mat_names]
+
+
+def _mat_sets(hmats, mat_names):
+    return {"element": [{"name": m, "labels": [k + 1 for k, hm in enumerate(hmats) if hm == m]}
+                        for m in mat_names]}
+
+
 # --------------------------------------------------------------------------- taper
-def build_taper(windio, r1, r2, model, out, reference="OML", nr=4, nsp=12, nw=3, mesh=0.02):
+def build_taper(windio, r1, r2, model, out, reference="OML", nr=4, nsp=12, nw=3, mesh=0.02, element="hex"):
+    """Tapered SG segment.  SOLID element type is the user's choice:
+      element='hex' -- structured ply-conforming loft (most accurate; can INVERT the thin web
+                       hexes on a steep/twisting taper -> honest gate refuses a broken mesh);
+      element='tet' -- unstructured gmsh/TetGen fill (ROBUST: never inverts on any taper; user
+                       accepts refinement).  The SHELL is always the quad mid-surface loft."""
     os.makedirs(out, exist_ok=True)
     blade = load_blade(windio)
     cs1 = build_cross_section(blade, r1, mesh_size=mesh)
     cs2 = build_cross_section(blade, r2, mesh_size=mesh)
     z1, z2 = blade_z(blade, r1), blade_z(blade, r2)
-    print("TAPER r=%.3f->%.3f  chord %.3f->%.3f  z=[%.2f, %.2f] m  model=%s ref=%s"
-          % (r1, r2, cs1["chord"], cs2["chord"], z1, z2, model, reference))
-    res = hex_between_sections(cs1, cs2, z1, z2, nr=nr, nsp=nsp, nw=nw, mesh_size=mesh)
+    print("TAPER r=%.3f->%.3f  chord %.3f->%.3f  z=[%.2f, %.2f] m  model=%s ref=%s  solid-element=%s"
+          % (r1, r2, cs1["chord"], cs2["chord"], z1, z2, model, reference, element))
     tag = "r%03d_%03d" % (round(r1 * 100), round(r2 * 100))
     written = []
+    need_res = (model in ("shell", "both")) or (model in ("solid", "both") and element == "hex")
+    res = hex_between_sections(cs1, cs2, z1, z2, nr=nr, nsp=nsp, nw=nw, mesh_size=mesh) if need_res else None
 
-    if model in ("solid", "both"):
+    if model in ("solid", "both") and element == "tet":
+        from opensg_io.tapered_tet import windio_taper_tets
+        nodes, tets, oris, hmats = windio_taper_tets(cs1, cs2, z1, z2, nr=nr, nw=nw, mesh_size=mesh)
+        mat_names = sorted(set(hmats))
+        p = os.path.join(out, "%s_solid_taper.yaml" % tag)
+        export_solid_yaml(p, nodes, tets, "tet", oris, _mat_cards(blade, mat_names),
+                          sets=_mat_sets(hmats, mat_names))
+        print("  solid (TET): %d nodes / %d tets ; conforming, robust (no inversion possible)"
+              % (len(nodes), len(tets)))
+        _render_tet(nodes, tets, hmats, mat_names, p.replace(".yaml", ".png"),
+                    "SOLID taper %s (TET, by material)" % tag)
+        written += [p, yaml_to_msh(p), p.replace(".yaml", ".png")]
+
+    if model in ("solid", "both") and element == "hex":
         nodes, hexes = res["nodes"], res["hexes"]
         msj, ninv = min_scaled_jacobian(nodes, hexes)
         if ninv:
             raise RuntimeError(
-                "SOLID taper r=%.2f->%.2f has %d inverted hexes (min scaled Jacobian %.3f) -- the thin "
-                "shear webs twist with the airfoil aerodynamic twist over this span.  Try a NARROWER or "
-                "less-twisted station pair (e.g. a 0.05-wide segment, or nearer mid-span)." % (r1, r2, ninv, msj))
+                "SOLID hex taper r=%.2f->%.2f has %d inverted hexes (min scaled Jacobian %.3f) -- the thin "
+                "shear webs twist with the airfoil aerodynamic twist over this span.  Use --element tet for a "
+                "robust (never-inverting) mesh, or try a NARROWER / less-twisted station pair." % (r1, r2, ninv, msj))
         assert_conforming(nodes, hexes, "hex")
         oris, hmats = solid_yaml_payload(res, cs1, cs2)
         mat_names = sorted(set(hmats))
-        sets = {"element": [{"name": m, "labels": [k + 1 for k, hm in enumerate(hmats) if hm == m]}
-                            for m in mat_names]}
-        mats = [{"name": m, **{k: _mat_block(blade, m)["elastic"][k] for k in ("E", "G", "nu")},
-                 "rho": _mat_block(blade, m)["density"]} for m in mat_names]
         p = os.path.join(out, "%s_solid_taper.yaml" % tag)
-        export_solid_yaml(p, nodes, hexes, "hex", oris, mats, sets=sets)
-        print("  solid: %d nodes / %d hexes ; gates PASS (min SJ %.3f)" % (len(nodes), len(hexes), msj))
+        export_solid_yaml(p, nodes, hexes, "hex", oris, _mat_cards(blade, mat_names),
+                          sets=_mat_sets(hmats, mat_names))
+        print("  solid (HEX): %d nodes / %d hexes ; gates PASS (min SJ %.3f)" % (len(nodes), len(hexes), msj))
         _render_hex(nodes, hexes, hmats, mat_names, p.replace(".yaml", ".png"),
-                    "SOLID taper %s (by material)" % tag)
+                    "SOLID taper %s (HEX, by material)" % tag)
         written += [p, yaml_to_msh(p), p.replace(".yaml", ".png")]
 
     if model in ("shell", "both"):
@@ -284,6 +363,13 @@ def _render_hex(nodes, hexes, hmats, mat_names, png, title):
     print("  wrote", os.path.basename(png))
 
 
+def _render_tet(nodes, tets, hmats, mat_names, png, title):
+    from opensg_io.render3d import render_mesh_png
+    hset = {m: i for i, m in enumerate(mat_names)}
+    render_mesh_png(nodes, tets, "tet", np.array([hset[m] for m in hmats], int), png, title)
+    print("  wrote", os.path.basename(png))
+
+
 def _render_quad(nodes, quads, setmap, png, title):
     from opensg_io.render3d import render_mesh_png
     render_mesh_png(nodes, quads, "quad", np.array(setmap, int), png, title)
@@ -319,11 +405,53 @@ def _render_boundary(yaml_path, png, title, quad):
     print("  wrote", os.path.basename(png))
 
 
+# --------------------------------------------------------------------------- sweep
+def build_sweep(windio, model, out, reference="OML", nr=4, nsp=12, nw=3, mesh=0.02, element="tet"):
+    """Root -> tip sweep over ADJACENT windIO station pairs.  Each pair gets its OWN folder with
+    the gated SG segment(s).  A pair that fails its gate is RECORDED and the sweep continues (one
+    bad pair never aborts the run).  Writes a summary .dat listing every pair PASS/FAIL."""
+    os.makedirs(out, exist_ok=True)
+    blade = load_blade(windio)
+    valid = []
+    for r, name in windio_stations(windio):
+        try:
+            cs = build_cross_section(blade, r, mesh_size=0.05)
+            if len(cs["webs"]) >= 1 and "circular" not in name.lower():
+                valid.append(round(r, 4))
+        except Exception:
+            pass
+    pairs = list(zip(valid[:-1], valid[1:]))
+    print("SWEEP %s: %d adjacent windIO pairs, solid element=%s, model=%s"
+          % (os.path.basename(windio), len(pairs), element, model))
+    rows = []
+    for r1, r2 in pairs:
+        tag = "r%03d_%03d" % (round(r1 * 100), round(r2 * 100))
+        seg = os.path.join(out, tag)
+        try:
+            build_taper(windio, r1, r2, model, seg, reference, nr, nsp, nw, mesh, element)
+            rows.append((r1, r2, "PASS", ""))
+            print("  [PASS] %s -> %s" % (tag, seg))
+        except Exception as e:
+            rows.append((r1, r2, "FAIL", "%s: %s" % (type(e).__name__, str(e)[:70])))
+            print("  [FAIL] %s : %s" % (tag, str(e)[:90]))
+    dat = os.path.join(out, "sweep_summary.dat")
+    npass = sum(1 for _r1, _r2, s, _n in rows if s == "PASS")
+    with open(dat, "w") as f:
+        f.write("# OpenSG_io root->tip sweep : %s\n" % os.path.basename(windio))
+        f.write("# solid element = %s ; model = %s ; %d/%d pairs PASS\n#\n"
+                % (element, model, npass, len(rows)))
+        f.write("# %-16s %-8s %s\n" % ("pair r1->r2", "status", "note"))
+        for r1, r2, s, note in rows:
+            f.write("%-18s %-8s %s\n" % ("%.4f->%.4f" % (r1, r2), s, note))
+    print("\nsweep summary: %d/%d PASS -> %s" % (npass, len(rows), dat))
+    return rows
+
+
 # --------------------------------------------------------------------------- cli
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("windio")
-    ap.add_argument("mode", choices=["stations", "boundary", "taper"])
+    ap.add_argument("mode", choices=["stations", "boundary", "taper", "sweep"])
     ap.add_argument("--r", type=float); ap.add_argument("--r1", type=float); ap.add_argument("--r2", type=float)
     ap.add_argument("--to-root", action="store_true",
                     help="taper: with --r R only, build the segment [R-step, R] (adjacent station toward root)")
@@ -332,23 +460,33 @@ def main():
     ap.add_argument("--out", default=os.path.join(HERE, "mesh_out"))
     ap.add_argument("--nr", type=int, default=4); ap.add_argument("--nsp", type=int, default=12)
     ap.add_argument("--nw", type=int, default=3); ap.add_argument("--mesh", type=float, default=0.02)
-    ap.add_argument("--mesher", choices=["auto", "prevabs", "struct"], default="auto",
-                    help="solid-boundary mesher: prevabs (established VABS mesher, linux binary), "
-                         "struct (portable structured section), auto (prevabs if available)")
+    ap.add_argument("--mesher", choices=["prevabs", "auto", "struct"], default="prevabs",
+                    help="solid-boundary mesher: prevabs (DEFAULT -- established VABS mesher, guarantees an "
+                         "unbroken section; needs the linux binary/server), auto (prevabs if available else "
+                         "struct), struct (portable structured fallback for Windows dev)")
+    ap.add_argument("--element", choices=["hex", "tet"], default="tet",
+                    help="taper SOLID element type: tet (DEFAULT -- unstructured TetGen fill, ROBUST: never "
+                         "inverts on any taper; the hex loft inverts on ~12/13 IEA-22 adjacent pairs), hex "
+                         "(structured ply-conforming loft, most accurate but only valid where it passes the "
+                         "inversion gate -- use for mild/near-prismatic pairs)")
     a = ap.parse_args()
+    # whenever a windIO file is read, always emit the main blade-data .dat
+    write_blade_dat(a.windio, a.out)
     if a.mode == "stations":
         list_stations(a.windio)
     elif a.mode == "boundary":
         assert a.r is not None, "boundary needs --r"
         w = build_boundary(a.windio, a.r, a.model, a.out, a.reference, a.nr, a.nw, a.mesh, a.mesher)
         print("\nOUTPUTS:", *w, sep="\n  ")
+    elif a.mode == "sweep":
+        build_sweep(a.windio, a.model, a.out, a.reference, a.nr, a.nsp, a.nw, a.mesh, a.element)
     else:
         r1, r2 = a.r1, a.r2
         if r1 is None or r2 is None:                       # single windIO station: span from the one toward root
             assert a.r is not None, "taper needs --r1 --r2 (windIO stations), or a single --r (uses the adjacent windIO station toward root)"
             r2 = a.r
             r1 = prev_station(a.windio, a.r)
-        w = build_taper(a.windio, r1, r2, a.model, a.out, a.reference, a.nr, a.nsp, a.nw, a.mesh)
+        w = build_taper(a.windio, r1, r2, a.model, a.out, a.reference, a.nr, a.nsp, a.nw, a.mesh, a.element)
         print("\nOUTPUTS:", *w, sep="\n  ")
 
 

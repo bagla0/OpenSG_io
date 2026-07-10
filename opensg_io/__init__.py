@@ -6,6 +6,16 @@ Inputs (OpenSG_io does NOT run windIO or OpenFAST -- it only READS their files t
   - OpenFAST blade data       -> openfast_io.read_elastodyn_blade()/read_beamdyn_blade() as a validation
                                  reference (OpenFAST carries no layup, so no SG is built from it).
 """
+import os as _os
+
+# Force off-screen SOFTWARE OpenGL for PyVista/VTK renders.  This MUST be set before the first
+# pyvista/VTK import anywhere in the process (tetgen_fill imports pyvista during meshing, well
+# before any render), else VTK grabs the compute server's GPU (nouveau) and segfaults on large
+# meshes.  Setting it here in the package __init__ guarantees it runs before any submodule loads.
+_os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
+_os.environ.setdefault("GALLIUM_DRIVER", "llvmpipe")
+_os.environ.setdefault("PYVISTA_OFF_SCREEN", "true")
+
 from .converter import (
     WindIOBlade,
     WindIOBladeV1,

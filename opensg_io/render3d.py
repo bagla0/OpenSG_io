@@ -7,6 +7,13 @@ fallback shades the BOUNDARY faces of the solid (outer skin + the two end caps,
 which expose the through-thickness hex layering and the webs) or the shell quads.
 """
 import os
+
+# Force Mesa SOFTWARE OpenGL for off-screen PyVista/VTK: the compute server's GPU (nouveau)
+# rejects large pushbuffers and segfaults on big meshes; llvmpipe renders them reliably.
+os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
+os.environ.setdefault("GALLIUM_DRIVER", "llvmpipe")
+os.environ.setdefault("PYVISTA_OFF_SCREEN", "true")
+
 import numpy as np
 
 PAL = np.array([
@@ -33,6 +40,24 @@ def boundary_faces(hexes):
     return [v for v in seen.values() if v is not None]
 
 
+_TETF = [(0, 1, 2), (0, 1, 3), (0, 2, 3), (1, 2, 3)]
+
+
+def boundary_faces_tet(tets):
+    """Triangle faces of the tet mesh shared by exactly ONE tet (the outer surface),
+    with the owning tet index."""
+    seen = {}
+    for k, t in enumerate(tets):
+        for f in _TETF:
+            tri = tuple(int(t[i]) for i in f)
+            key = tuple(sorted(tri))
+            if key in seen:
+                seen[key] = None
+            else:
+                seen[key] = (tri, k)
+    return [v for v in seen.values() if v is not None]
+
+
 # --------------------------------------------------------------------------- pyvista
 def _render_pyvista(nodes, cells, celltype, setmap, png, title):
     import pyvista as pv
@@ -45,6 +70,9 @@ def _render_pyvista(nodes, cells, celltype, setmap, png, title):
     if celltype == "hex":
         vtk_cells = np.hstack([np.full((n, 1), 8, np.int64), cells]).ravel()
         ct = np.full(n, pv.CellType.HEXAHEDRON, np.uint8)
+    elif celltype == "tet":
+        vtk_cells = np.hstack([np.full((n, 1), 4, np.int64), cells]).ravel()
+        ct = np.full(n, pv.CellType.TETRA, np.uint8)
     else:
         vtk_cells = np.hstack([np.full((n, 1), 4, np.int64), cells]).ravel()
         ct = np.full(n, pv.CellType.QUAD, np.uint8)
@@ -78,6 +106,10 @@ def _render_mpl(nodes, cells, celltype, setmap, png, title):
     if celltype == "hex":
         faceset = boundary_faces(cells)
         quads = np.array([q for q, _k in faceset], int)
+        fset = np.array([setmap[k] for _q, k in faceset], int)
+    elif celltype == "tet":
+        faceset = boundary_faces_tet(cells)
+        quads = np.array([q for q, _k in faceset], int)      # triangles (nf,3); Poly3DCollection ok
         fset = np.array([setmap[k] for _q, k in faceset], int)
     else:
         quads = np.asarray(cells, int)
