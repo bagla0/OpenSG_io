@@ -20,7 +20,10 @@ Usage
       [--reference OML|mid] [--nr 4] [--nsp 12] [--nw 3] [--mesh 0.02]
 """
 import argparse
+import glob
 import os
+import platform
+import subprocess
 import sys
 
 import numpy as np
@@ -174,23 +177,33 @@ def build_taper(windio, r1, r2, model, out, reference="OML", nr=4, nsp=12, nw=3,
 
 
 # --------------------------------------------------------------------------- boundary
-def build_boundary(windio, r, model, out, reference="OML", nr=4, nw=3, mesh=0.02):
+def build_boundary(windio, r, model, out, reference="OML", nr=4, nw=3, mesh=0.02, mesher="auto"):
     os.makedirs(out, exist_ok=True)
     blade = load_blade(windio)
     cs = build_cross_section(blade, r, mesh_size=mesh)
     z = blade_z(blade, r)
-    print("BOUNDARY r=%.3f  chord %.3f  z=%.2f m  model=%s ref=%s" % (r, cs["chord"], z, model, reference))
-    # a boundary is one cross-section; realize it as the L end of a thin prismatic segment
-    # (only the 2-D end section is exported, so the throwaway 3-D hexes are not gated)
+    # SOLID boundary mesher: 'prevabs' = the established VABS cross-section mesher (native webs,
+    # no loft/twist inversion) -- linux binary only; 'struct' = the portable structured section.
+    # 'auto' picks PreVABS when its binary is present on a linux host, else the structured section.
+    if mesher == "auto":
+        mesher = "prevabs" if (platform.system() == "Linux" and _prevabs_binary()) else "struct"
+    print("BOUNDARY r=%.3f  chord %.3f  z=%.2f m  model=%s ref=%s  solid-mesher=%s"
+          % (r, cs["chord"], z, model, reference, mesher))
+    # a boundary is one cross-section; realize the structured section as the L end of a thin
+    # prismatic segment (only the 2-D end section is exported, throwaway 3-D hexes are not gated)
     res = hex_between_sections(cs, cs, z, z + 0.1, nr=nr, nsp=1, nw=nw, mesh_size=mesh)
     tag = "r%03d" % round(r * 100)
     written = []
 
     if model in ("solid", "both"):
-        p = os.path.join(out, "%s_solid_boundary.yaml" % tag)
-        _dump(solid_boundary_payload(res, cs, cs, 0, blade, _mat_block), p)
-        print("  solid boundary (2-D quad section) written")
-        _render_boundary(p, p.replace(".yaml", ".png"), "SOLID boundary %s (2-D quad, by material)" % tag, quad=True)
+        if mesher == "prevabs":
+            p = _build_solid_boundary_prevabs(cs, blade, out, tag, mesh)
+        else:
+            p = os.path.join(out, "%s_solid_boundary.yaml" % tag)
+            _dump(solid_boundary_payload(res, cs, cs, 0, blade, _mat_block), p)
+            print("  solid boundary (2-D quad section) written")
+            _render_boundary(p, p.replace(".yaml", ".png"),
+                             "SOLID boundary %s (2-D quad, by material)" % tag, quad=True)
         written += [p, yaml_to_msh(p), p.replace(".yaml", ".png")]
 
     if model in ("shell", "both"):
@@ -201,6 +214,66 @@ def build_boundary(windio, r, model, out, reference="OML", nr=4, nw=3, mesh=0.02
         _render_boundary(p, p.replace(".yaml", ".png"), "SHELL boundary %s (1-D, %s ref)" % (tag, reference), quad=False)
         written += [p, yaml_to_msh(p), p.replace(".yaml", ".png")]
     return written
+
+
+# --------------------------------------------------------------------------- PreVABS boundary mesher
+def _prevabs_binary():
+    """Locate the PreVABS linux binary shipped under third_party/ (or None)."""
+    pats = ["~/OpenSG_io/third_party/prevabs_bin/**/prevabs",
+            "~/OpenSG_io/third_party/prevabs/**/prevabs",
+            os.path.join(os.path.dirname(HERE), "third_party", "prevabs_bin", "**", "prevabs"),
+            os.path.join(os.path.dirname(HERE), "third_party", "prevabs", "**", "prevabs")]
+    for pat in pats:
+        hits = sorted(glob.glob(os.path.expanduser(pat), recursive=True))
+        hits = [h for h in hits if os.path.isfile(h) and not h.endswith((".so", ".dll"))]
+        if hits:
+            return hits[0]
+    return None
+
+
+def _build_solid_boundary_prevabs(cs, blade, out, tag, mesh):
+    """windIO station -> PreVABS XML -> run PreVABS -> .sg -> 2-D solid YAML (FEniCS format).
+
+    PreVABS is the established VABS cross-section mesher: it meshes the webbed airfoil natively,
+    so there is no loft/twist hex inversion.  Needs the linux binary (run on the server)."""
+    from opensg_io.converter import emit_prevabs
+    if platform.system() != "Linux":
+        raise RuntimeError("--mesher prevabs needs the linux PreVABS binary; run this on the server "
+                           "(msg.ecn.purdue.edu, opensg_2_0 env). On Windows use --mesher struct.")
+    pv = _prevabs_binary()
+    if pv is None:
+        raise RuntimeError("PreVABS binary not found under third_party/prevabs*; run scripts/fetch_prevabs.py.")
+    work = os.path.join(out, "pv_%s" % tag)
+    name = "%s_pv" % tag
+    emit_prevabs(cs, work, name=name, mesh_size=mesh)
+    env_lib = os.path.join(os.path.dirname(os.path.dirname(sys.executable)), "lib")   # active conda env lib
+    env = dict(os.environ, LD_LIBRARY_PATH=os.pathsep.join(
+        [os.path.dirname(pv), env_lib, os.environ.get("LD_LIBRARY_PATH", "")]))
+    res = subprocess.run([pv, "-i", name + ".xml", "--vabs", "--hm"], cwd=work, env=env,
+                         capture_output=True, text=True)
+    if res.returncode != 0:
+        raise RuntimeError("PreVABS failed (rc=%d):\n%s" % (res.returncode, (res.stdout + res.stderr)[-1400:]))
+    sg = os.path.join(work, name + ".sg")
+    conv = os.path.join(os.path.dirname(HERE), "scripts", "convert_sg_to_yaml.py")
+    p = os.path.join(out, "%s_solid_boundary.yaml" % tag)
+    r2 = subprocess.run([sys.executable, conv, sg, p], capture_output=True, text=True)
+    if r2.returncode != 0:
+        raise RuntimeError("convert_sg_to_yaml failed:\n%s" % (r2.stdout + r2.stderr)[-1200:])
+    # gate: consistent winding (all element signed-areas same sign) => no tangled/inverted elements
+    d = yaml.safe_load(open(p))
+    P = np.array([[float(v) for v in row[0].split()] for row in d["nodes"]])[:, 1:]
+    cells = [[int(v) - 1 for v in row[0].split()] for row in d["elements"]]
+    area = [sum(P[e[k], 0] * P[e[(k + 1) % len(e)], 1] - P[e[(k + 1) % len(e)], 0] * P[e[k], 1]
+                for k in range(len(e))) for e in cells]
+    npos = sum(a > 0 for a in area); nneg = sum(a < 0 for a in area)
+    if npos and nneg:
+        raise RuntimeError("PreVABS mesh has MIXED-winding elements (%d +, %d -) -- tangled." % (npos, nneg))
+    tri = sum(len(e) == 3 for e in cells); quad = sum(len(e) == 4 for e in cells)
+    print("  solid boundary via PreVABS: %d nodes / %d elems (tri=%d quad=%d) ; winding consistent"
+          % (len(P), len(cells), tri, quad))
+    _render_boundary(p, p.replace(".yaml", ".png"),
+                     "SOLID boundary %s (PreVABS 2-D mesh, by material)" % tag, quad=True)
+    return p
 
 
 # --------------------------------------------------------------------------- renders
@@ -259,12 +332,15 @@ def main():
     ap.add_argument("--out", default=os.path.join(HERE, "mesh_out"))
     ap.add_argument("--nr", type=int, default=4); ap.add_argument("--nsp", type=int, default=12)
     ap.add_argument("--nw", type=int, default=3); ap.add_argument("--mesh", type=float, default=0.02)
+    ap.add_argument("--mesher", choices=["auto", "prevabs", "struct"], default="auto",
+                    help="solid-boundary mesher: prevabs (established VABS mesher, linux binary), "
+                         "struct (portable structured section), auto (prevabs if available)")
     a = ap.parse_args()
     if a.mode == "stations":
         list_stations(a.windio)
     elif a.mode == "boundary":
         assert a.r is not None, "boundary needs --r"
-        w = build_boundary(a.windio, a.r, a.model, a.out, a.reference, a.nr, a.nw, a.mesh)
+        w = build_boundary(a.windio, a.r, a.model, a.out, a.reference, a.nr, a.nw, a.mesh, a.mesher)
         print("\nOUTPUTS:", *w, sep="\n  ")
     else:
         r1, r2 = a.r1, a.r2
