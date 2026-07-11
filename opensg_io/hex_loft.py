@@ -248,8 +248,24 @@ def build_section_mesh(cs_list, skel, nr=4, ny_target=None):
     for wi, w in enumerate(webs0):
         top = bands[(wi, "s")]; bot = bands[(wi, "e")]
         # pair columns by physical proximity (arc directions may oppose across the section)
-        t0 = st[0]["oml"][top[0]]; b0 = st[0]["oml"][bot[0]]; bN = st[0]["oml"][bot[-1]]
-        bot = bot if np.linalg.norm(t0 - b0) <= np.linalg.norm(t0 - bN) else bot[::-1]
+        # Pair columns by ACROSS-BAND DIRECTION, checked at EVERY station (arc directions
+        # oppose across the section).  The old corner-distance heuristic (|t0-b0| <= |t0-bN|)
+        # is a millimeter-scale call on a metre-long tilted web once the band gets thin
+        # (e.g. all plies scaled to 0.2h shrink it 5x) and can pick the WRONG orientation ->
+        # every column line crosses mid-web (twisted plate) -> concave/degenerate cells that
+        # invert even a PRISMATIC loft.  dot(top_dir, bot_dir) is width-independent.
+        def _pair_dot(stx, bb):
+            tdir = stx["oml"][top[-1]] - stx["oml"][top[0]]
+            bdir = stx["oml"][bb[-1]] - stx["oml"][bb[0]]
+            return float(np.dot(tdir, bdir))
+        dots = [_pair_dot(stx, bot) for stx in st]
+        if all(d < 0.0 for d in dots):
+            bot = bot[::-1]
+        elif any(d < 0.0 for d in dots):
+            # stations disagree = genuinely twisted plate across the span; keep the
+            # orientation consistent with station 0 (the loft gate reports the fold).
+            if dots[0] < 0.0:
+                bot = bot[::-1]
         depth = float(np.linalg.norm(st[0]["oml"][top[len(top) // 2]] - st[0]["oml"][bot[len(bot) // 2]]))
         htarget = ny_target or max(1e-9, (cs_list[0]["perim"] / NC))
         NYs.append(max(4, int(round(depth / htarget))))
