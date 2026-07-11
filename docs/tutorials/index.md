@@ -17,6 +17,14 @@ The blade segment between $r=0.2$ and $r=0.3$ from the bundled windIO: strictly
 structured hex solid formed from the layup + the equivalent quad shell, conformity and
 min-scaled-Jacobian gates, shaded mesh renders.
 :::
+
+:::{grid-item-card} ★ · Mixed hex+tet taper (conformal auto-refinement)
+:link: mixed_mesh
+:link-type: doc
+The production solid-taper mesher: structured hex skin + tet webs, marching from one
+boundary to the other and inserting true intermediate cross-sections wherever a span
+interval fails the quality gate — API, CLI, agent interaction, guarantees.
+:::
 ::::
 
 ## Input guides

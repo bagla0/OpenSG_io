@@ -66,13 +66,13 @@ def yaml_to_msh(yaml_path, msh_path=None):
     else:                                                  # [x,y,z] / 0-based
         nodes = [list(map(float, r)) for r in rows]
         cells = [list(map(int, e)) for e in d["elements"]]
-    n0 = len(cells[0])
-    if n0 == 4:                                            # 4 nodes: tet (3-D volume) or quad (planar)
-        q = np.array(nodes)[cells[0]]
-        vol = abs(float(np.dot(np.cross(q[1] - q[0], q[2] - q[0]), q[3] - q[0])))
-        etype = 4 if vol > 1e-12 else 3                    # gmsh 4 = tet, 3 = quad
-    else:
-        etype = {8: 5, 3: 2, 2: 1}[n0]                     # hex / tri / line -> gmsh type
+    def _etype(c):                                         # per-element (MIXED meshes supported)
+        n0 = len(c)
+        if n0 == 4:                                        # tet (3-D volume) or quad (planar)
+            q = np.array(nodes)[c]
+            vol = abs(float(np.dot(np.cross(q[1] - q[0], q[2] - q[0]), q[3] - q[0])))
+            return 4 if vol > 1e-12 else 3                 # gmsh 4 = tet, 3 = quad
+        return {8: 5, 3: 2, 2: 1}[n0]                      # hex / tri / line
     tag = [1] * len(cells)
     for si, s in enumerate(d.get("sets", {}).get("element", [])):
         for lab in s["labels"]:
@@ -83,7 +83,7 @@ def yaml_to_msh(yaml_path, msh_path=None):
             f.write("%d %.9g %.9g %.9g\n" % (i + 1, p[0], p[1], p[2]))
         f.write("$EndNodes\n$Elements\n%d\n" % len(cells))
         for j, c in enumerate(cells):
-            f.write("%d %d 2 %d %d %s\n" % (j + 1, etype, tag[j], tag[j],
+            f.write("%d %d 2 %d %d %s\n" % (j + 1, _etype(c), tag[j], tag[j],
                                             " ".join(str(int(n) + 1) for n in c)))
         f.write("$EndElements\n")
     return msh_path
@@ -208,6 +208,21 @@ def build_taper(windio, r1, r2, model, out, reference="OML", nr=4, nsp=12, nw=3,
     written = []
     need_res = (model in ("shell", "both"))
     res = hex_between_sections(cs1, cs2, z1, z2, nr=nr, nsp=nsp, nw=nw, mesh_size=mesh) if need_res else None
+
+    if model in ("solid", "both") and element == "mixed":
+        # MIXED hex+tet with CONFORMAL auto-refinement: structured hex skin (nr through
+        # the wall) + web hexes split to 6 tets; the generator marches L->R inserting TRUE
+        # intermediate cross-sections wherever an interval fails the quality gate.
+        from opensg_io.mixed_mesh import mixed_taper_mesh, write_mixed_yaml, render_mixed_png
+        mesh = mixed_taper_mesh(blade, r1, r2, n_thick=nr, n_span=nsp, nw=nw, mesh_size=mesh)
+        p = os.path.join(out, "%s_solid_taper.yaml" % tag)
+        write_mixed_yaml(p, mesh)
+        rep = mesh["report"]
+        print("  solid (MIXED): %d skin hex + %d web tet ; min SJ %.3f ; %d station(s) auto-inserted"
+              % (rep["n_hex"], rep["n_tet"], rep["min_sj_hex"], len(rep["stations"]) - 2))
+        render_mixed_png(p.replace(".yaml", ".png"), mesh,
+                         "SOLID taper %s (MIXED hex skin + tet webs, by material)" % tag)
+        written += [p, yaml_to_msh(p), p.replace(".yaml", ".png")]
 
     if model in ("solid", "both") and element == "tet":
         from opensg_io.tapered_tet import windio_taper_tets
@@ -462,11 +477,12 @@ def main():
                     help="solid-boundary mesher: prevabs (DEFAULT -- established VABS mesher, guarantees an "
                          "unbroken section; needs the linux binary/server), auto (prevabs if available else "
                          "struct), struct (portable structured fallback for Windows dev)")
-    ap.add_argument("--element", choices=["hex", "tet"], default="tet",
-                    help="taper SOLID element type: tet (DEFAULT -- unstructured TetGen fill, ROBUST: never "
-                         "inverts on any taper; the hex loft inverts on ~12/13 IEA-22 adjacent pairs), hex "
-                         "(structured ply-conforming loft, most accurate but only valid where it passes the "
-                         "inversion gate -- use for mild/near-prismatic pairs)")
+    ap.add_argument("--element", choices=["mixed", "hex", "tet"], default="mixed",
+                    help="taper SOLID element type: mixed (DEFAULT -- structured hex skin + tet webs with "
+                         "CONFORMAL auto-refinement: marches L->R inserting true intermediate cross-sections "
+                         "where an interval fails the quality gate; --nr = elements through thickness, "
+                         "--nsp = span elements), hex (all-structured loft, gated), tet (unstructured "
+                         "gmsh fill, robust fallback)")
     a = ap.parse_args()
     # whenever a windIO file is read, always emit the main blade-data .dat
     write_blade_dat(a.windio, a.out)

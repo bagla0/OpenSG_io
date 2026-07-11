@@ -54,6 +54,7 @@ inputs
 
 tutorials/index
 tutorials/iea22_tutorial
+tutorials/mixed_mesh
 tutorials/windio
 tutorials/prevabs_xml
 tutorials/openfast
